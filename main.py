@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import pytz
 from icalendar import Calendar, Event
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -12,8 +13,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    BufferedInputFile,
-    ReplyKeyboardRemove
+    BufferedInputFile
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -53,7 +53,6 @@ def init_db():
             client_chat_id INTEGER,
             client_name TEXT,
             client_username TEXT,
-            client_phone TEXT,
             service_key TEXT,
             status TEXT DEFAULT 'booked',
             reminded_24h INTEGER DEFAULT 0,
@@ -64,7 +63,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- ГЕНЕРАЦИЯ КАЛЕНДАРЯ (.ICS) ---
+# --- ГЕНЕРАЦИЯ КАЛЕНДАРЯ (.ICS ДЛЯ IPHONE) ---
 def generate_ics(service_title: str, client_name: str, client_contact: str, start_dt: datetime, duration_hours: float) -> bytes:
     cal = Calendar()
     cal.add('prodid', '-//Manicure Booking System//RU')
@@ -103,8 +102,7 @@ def get_admin_main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить окошки в график", callback_data="admin_add_slots")],
         [InlineKeyboardButton(text="📢 Опубликовать график в канал", callback_data="admin_post_channel")],
-        [InlineKeyboardButton(text="📝 Записать клиента вручную", callback_data="admin_manual_book")],
-        [InlineKeyboardButton(text="📋 Список всех записей", callback_data="admin_list_bookings")]
+        [InlineKeyboardButton(text="📝 Записать клиента вручную", callback_data="admin_manual_book")]
     ])
 
 def get_services_kb(prefix="service"):
@@ -127,10 +125,10 @@ async def admin_add_slots_start(call: types.CallbackQuery, state: FSMContext):
     await call.message.edit_text(
         "📅 **Введите даты и время окошек** списком в формате `ДД.ММ Время`.\n\n"
         "Например:\n"
-        "`05.10 10:00`\n"
-        "`05.10 14:00`\n"
-        "`05.10 18:00`\n"
-        "`06.10 12:00`",
+        "`15.09 10:00`\n"
+        "`15.09 14:00`\n"
+        "`15.09 18:00`\n"
+        "`16.09 12:00`",
         parse_mode="Markdown"
     )
     await state.set_state(AdminAddSlots.entering_slots)
@@ -204,7 +202,7 @@ async def admin_manual_start(call: types.CallbackQuery, state: FSMContext):
         return
 
     buttons = [[InlineKeyboardButton(text=f"{d} в {t}", callback_data=f"manslot_{sid}")] for sid, d, t in slots]
-    await call.message.edit_text("Выберите свободный слот для записи клиента:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await call.message.edit_text("Выберите слот для записи клиента:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await state.set_state(AdminManualBooking.choosing_slot)
 
 @dp.callback_query(AdminManualBooking.choosing_slot, F.data.startswith("manslot_"))
@@ -224,7 +222,7 @@ async def admin_manual_service_picked(call: types.CallbackQuery, state: FSMConte
 @dp.message(AdminManualBooking.entering_client_name)
 async def admin_manual_name_entered(message: types.Message, state: FSMContext):
     await state.update_data(client_name=message.text.strip())
-    await message.answer("Введите **контакт клиента** (@username или номер телефона):")
+    await message.answer("Введите **контакт клиента** (@username или телефон):")
     await state.set_state(AdminManualBooking.entering_client_contact)
 
 @dp.message(AdminManualBooking.entering_client_contact)
@@ -251,7 +249,6 @@ async def admin_manual_finish(message: types.Message, state: FSMContext):
     bot_me = await bot.get_me()
     invite_link = f"https://t.me/{bot_me.username}?start=reg_{app_id}"
 
-    # Генерация .ics файла для календаря iPhone
     current_year = datetime.now().year
     day, month = map(int, slot_date.split("."))
     hour, minute = map(int, slot_time.split(":"))
@@ -368,7 +365,6 @@ async def client_finish(message: types.Message, state: FSMContext):
 
     srv = SERVICES[service_key]
 
-    # Подтверждение клиенту
     await message.answer(
         f"🌸 **Вы успешно записаны!**\n\n"
         f"🗓 **Когда:** {chosen_date} в {slot_time}\n"
@@ -378,7 +374,6 @@ async def client_finish(message: types.Message, state: FSMContext):
         parse_mode="Markdown"
     )
 
-    # Уведомление мастеру + .ics файл
     current_year = datetime.now().year
     day, month = map(int, chosen_date.split("."))
     hour, minute = map(int, slot_time.split(":"))
@@ -425,7 +420,7 @@ async def check_reminders():
         hours_diff = time_diff.total_seconds() / 3600.0
         srv_title = SERVICES[s_key]["title"]
 
-        # Напоминание за 24 часа (в интервале 23.5 - 24.5 часов до начала)
+        # Напоминание за 24 часа
         if 23.5 <= hours_diff <= 24.5 and not rem_24:
             kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="✅ Буду обязательно", callback_data=f"conf_{app_id}"),
@@ -446,7 +441,7 @@ async def check_reminders():
             except Exception:
                 pass
 
-        # Напоминание за 2 часа (в интервале 1.5 - 2.5 часов)
+        # Напоминание за 2 часа
         if 1.5 <= hours_diff <= 2.5 and not rem_2:
             kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="✅ Да, уже собираюсь", callback_data=f"conf_{app_id}"),
@@ -468,7 +463,7 @@ async def check_reminders():
 
     conn.close()
 
-# --- ОБРАБОТЧИКИ КНОПОК НАПОМИНАНИЯ ---
+# --- ОБРАБОТЧИКИ КНОПОК ПОДТВЕРЖДЕНИЯ И ОТМЕНЫ ---
 @dp.callback_query(F.data.startswith("conf_"))
 async def handle_confirm(call: types.CallbackQuery):
     app_id = int(call.data.split("_")[1])
@@ -514,12 +509,27 @@ async def handle_cancel(call: types.CallbackQuery):
         )
     conn.close()
 
-# --- ГЛАВНЫЙ ЗАПУСК ---
+# --- ВСТРОЕННЫЙ СЕРВЕР ДЛЯ RENDER FREE WEB SERVICE ---
+async def handle_ping(request):
+    return web.Response(text="Bot is running 24/7!")
+
+async def run_dummy_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+# --- ЗАПУСК ---
 async def main():
     init_db()
     scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
     scheduler.add_job(check_reminders, "interval", minutes=1)
     scheduler.start()
+    
+    await run_dummy_server()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
