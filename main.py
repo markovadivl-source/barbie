@@ -1,0 +1,526 @@
+import os
+import sqlite3
+import asyncio
+from datetime import datetime, timedelta
+import pytz
+from icalendar import Calendar, Event
+
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    BufferedInputFile,
+    ReplyKeyboardRemove
+)
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+# --- НАСТРОЙКИ МАСТЕРА ---
+BOT_TOKEN = "8910204900:AAGw63KIO2BdBagoVHTgRZj9l4vHQsaA5EQ"
+MASTER_CHAT_ID = 1293157140
+CHANNEL_ID = -1001886513960  # ID канала с префиксом -100
+ADDRESS = "ул. Гагарина 232, 1 подъезд, 5 этаж, кв. 12"
+MOSCOW_TZ = pytz.timezone("Europe/Moscow")
+
+SERVICES = {
+    "manicure": {"title": "💅 Маникюр", "duration": 2.5},
+    "pedicure": {"title": "🦶 Педикюр", "duration": 1.5},
+    "extension": {"title": "✨ Наращивание / Коррекция", "duration": 3.5},
+    "complex": {"title": "🌸 Маникюр + Педикюр", "duration": 4.0},
+}
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+# --- БАЗА ДАННЫХ ---
+def init_db():
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS slots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT,
+            time TEXT,
+            is_booked INTEGER DEFAULT 0
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS appointments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slot_id INTEGER,
+            client_chat_id INTEGER,
+            client_name TEXT,
+            client_username TEXT,
+            client_phone TEXT,
+            service_key TEXT,
+            status TEXT DEFAULT 'booked',
+            reminded_24h INTEGER DEFAULT 0,
+            reminded_2h INTEGER DEFAULT 0,
+            FOREIGN KEY (slot_id) REFERENCES slots(id)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+# --- ГЕНЕРАЦИЯ КАЛЕНДАРЯ (.ICS) ---
+def generate_ics(service_title: str, client_name: str, client_contact: str, start_dt: datetime, duration_hours: float) -> bytes:
+    cal = Calendar()
+    cal.add('prodid', '-//Manicure Booking System//RU')
+    cal.add('version', '2.0')
+
+    end_dt = start_dt + timedelta(hours=duration_hours)
+
+    event = Event()
+    event.add('summary', f"{service_title} - {client_name}")
+    event.add('description', f"Клиент: {client_name}\nКонтакт: {client_contact}\nУслуга: {service_title}")
+    event.add('location', ADDRESS)
+    event.add('dtstart', start_dt)
+    event.add('dtend', end_dt)
+    cal.add_component(event)
+
+    return cal.to_ical()
+
+# --- СОСТОЯНИЯ (FSM) ---
+class ClientBooking(StatesGroup):
+    choosing_date = State()
+    choosing_time = State()
+    choosing_service = State()
+    entering_name = State()
+
+class AdminAddSlots(StatesGroup):
+    entering_slots = State()
+
+class AdminManualBooking(StatesGroup):
+    choosing_slot = State()
+    choosing_service = State()
+    entering_client_name = State()
+    entering_client_contact = State()
+
+# --- КЛАВИАТУРЫ ---
+def get_admin_main_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить окошки в график", callback_data="admin_add_slots")],
+        [InlineKeyboardButton(text="📢 Опубликовать график в канал", callback_data="admin_post_channel")],
+        [InlineKeyboardButton(text="📝 Записать клиента вручную", callback_data="admin_manual_book")],
+        [InlineKeyboardButton(text="📋 Список всех записей", callback_data="admin_list_bookings")]
+    ])
+
+def get_services_kb(prefix="service"):
+    buttons = []
+    for key, val in SERVICES.items():
+        buttons.append([InlineKeyboardButton(text=f"{val['title']} ({val['duration']}ч)", callback_data=f"{prefix}_{key}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+# --- ПАНЕЛЬ МАСТЕРА ---
+@dp.message(Command("admin"))
+async def admin_panel(message: types.Message):
+    if message.from_user.id != MASTER_CHAT_ID:
+        return
+    await message.answer("🌸 **Панель управления расписанием**", reply_markup=get_admin_main_kb(), parse_mode="Markdown")
+
+@dp.callback_query(F.data == "admin_add_slots")
+async def admin_add_slots_start(call: types.CallbackQuery, state: FSMContext):
+    if call.from_user.id != MASTER_CHAT_ID:
+        return
+    await call.message.edit_text(
+        "📅 **Введите даты и время окошек** списком в формате `ДД.ММ Время`.\n\n"
+        "Например:\n"
+        "`05.10 10:00`\n"
+        "`05.10 14:00`\n"
+        "`05.10 18:00`\n"
+        "`06.10 12:00`",
+        parse_mode="Markdown"
+    )
+    await state.set_state(AdminAddSlots.entering_slots)
+
+@dp.message(AdminAddSlots.entering_slots)
+async def admin_add_slots_save(message: types.Message, state: FSMContext):
+    if message.from_user.id != MASTER_CHAT_ID:
+        return
+    lines = message.text.strip().split("\n")
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    count = 0
+    for line in lines:
+        parts = line.strip().split()
+        if len(parts) == 2:
+            date_str, time_str = parts[0], parts[1]
+            cur.execute("INSERT INTO slots (date, time, is_booked) VALUES (?, ?, 0)", (date_str, time_str))
+            count += 1
+    conn.commit()
+    conn.close()
+    await state.clear()
+    await message.answer(f"✅ Добавлено новых слотов: **{count}**", reply_markup=get_admin_main_kb(), parse_mode="Markdown")
+
+@dp.callback_query(F.data == "admin_post_channel")
+async def admin_post_channel(call: types.CallbackQuery):
+    if call.from_user.id != MASTER_CHAT_ID:
+        return
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    cur.execute("SELECT date, time FROM slots WHERE is_booked = 0 ORDER BY id ASC")
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        await call.answer("Нет свободных окошек для публикации!", show_alert=True)
+        return
+
+    schedule_dict = {}
+    for d, t in rows:
+        schedule_dict.setdefault(d, []).append(t)
+
+    text = "🌸 **Свободные окошки на процедуры:**\n\n"
+    for d, times in schedule_dict.items():
+        text += f"🗓 **{d}:** {', '.join(times)}\n"
+    text += f"\n📍 Адрес: {ADDRESS}\n✨ Жмите на кнопку ниже для быстрой записи:"
+
+    bot_me = await bot.get_me()
+    channel_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Записаться тут ✨", url=f"https://t.me/{bot_me.username}?start=book")]
+    ])
+
+    try:
+        await bot.send_message(chat_id=CHANNEL_ID, text=text, reply_markup=channel_kb, parse_mode="Markdown")
+        await call.answer("Пост успешно опубликован в канал! 🚀", show_alert=True)
+    except Exception as e:
+        await call.answer(f"Ошибка публикации: {e}", show_alert=True)
+
+# --- РУЧНАЯ ЗАПИСЬ МАСТЕРОМ ---
+@dp.callback_query(F.data == "admin_manual_book")
+async def admin_manual_start(call: types.CallbackQuery, state: FSMContext):
+    if call.from_user.id != MASTER_CHAT_ID:
+        return
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    cur.execute("SELECT id, date, time FROM slots WHERE is_booked = 0 ORDER BY id ASC LIMIT 15")
+    slots = cur.fetchall()
+    conn.close()
+
+    if not slots:
+        await call.answer("Нет свободных слотов!", show_alert=True)
+        return
+
+    buttons = [[InlineKeyboardButton(text=f"{d} в {t}", callback_data=f"manslot_{sid}")] for sid, d, t in slots]
+    await call.message.edit_text("Выберите свободный слот для записи клиента:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await state.set_state(AdminManualBooking.choosing_slot)
+
+@dp.callback_query(AdminManualBooking.choosing_slot, F.data.startswith("manslot_"))
+async def admin_manual_slot_picked(call: types.CallbackQuery, state: FSMContext):
+    slot_id = int(call.data.split("_")[1])
+    await state.update_data(slot_id=slot_id)
+    await call.message.edit_text("Выберите услугу для клиента:", reply_markup=get_services_kb("manservice"))
+    await state.set_state(AdminManualBooking.choosing_service)
+
+@dp.callback_query(AdminManualBooking.choosing_service, F.data.startswith("manservice_"))
+async def admin_manual_service_picked(call: types.CallbackQuery, state: FSMContext):
+    service_key = call.data.split("_")[1]
+    await state.update_data(service_key=service_key)
+    await call.message.edit_text("Введите **Имя клиента**:")
+    await state.set_state(AdminManualBooking.entering_client_name)
+
+@dp.message(AdminManualBooking.entering_client_name)
+async def admin_manual_name_entered(message: types.Message, state: FSMContext):
+    await state.update_data(client_name=message.text.strip())
+    await message.answer("Введите **контакт клиента** (@username или номер телефона):")
+    await state.set_state(AdminManualBooking.entering_client_contact)
+
+@dp.message(AdminManualBooking.entering_client_contact)
+async def admin_manual_finish(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    contact = message.text.strip()
+    slot_id = data["slot_id"]
+    service_key = data["service_key"]
+    name = data["client_name"]
+
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    cur.execute("UPDATE slots SET is_booked = 1 WHERE id = ?", (slot_id,))
+    cur.execute("""
+        INSERT INTO appointments (slot_id, client_name, client_username, service_key, status)
+        VALUES (?, ?, ?, ?, 'confirmed')
+    """, (slot_id, name, contact, service_key))
+    app_id = cur.lastrowid
+    cur.execute("SELECT date, time FROM slots WHERE id = ?", (slot_id,))
+    slot_date, slot_time = cur.fetchone()
+    conn.commit()
+    conn.close()
+
+    bot_me = await bot.get_me()
+    invite_link = f"https://t.me/{bot_me.username}?start=reg_{app_id}"
+
+    # Генерация .ics файла для календаря iPhone
+    current_year = datetime.now().year
+    day, month = map(int, slot_date.split("."))
+    hour, minute = map(int, slot_time.split(":"))
+    start_dt = MOSCOW_TZ.localize(datetime(current_year, month, day, hour, minute))
+    srv = SERVICES[service_key]
+
+    ics_bytes = generate_ics(srv["title"], name, contact, start_dt, srv["duration"])
+    ics_file = BufferedInputFile(ics_bytes, filename=f"booking_{slot_date}_{slot_time}.ics")
+
+    await message.answer(
+        f"✅ **Клиент успешно записан!**\n\n"
+        f"👤 {name} ({contact})\n"
+        f"🗓 {slot_date} в {slot_time}\n"
+        f"💅 {srv['title']}\n\n"
+        f"🔗 Ссылка для клиента для автонапоминаний:\n`{invite_link}`\n\n"
+        f"📎 Нажмите на файл ниже на iPhone, чтобы добавить запись в календарь:",
+        parse_mode="Markdown"
+    )
+    await bot.send_document(chat_id=MASTER_CHAT_ID, document=ics_file)
+    await state.clear()
+
+# --- КЛИЕНТСКИЙ СЦЕНАРИЙ ЗАПИСИ ---
+@dp.message(Command("start"))
+async def client_start(message: types.Message, state: FSMContext):
+    args = message.text.split()
+    if len(args) > 1 and args[1].startswith("reg_"):
+        app_id = int(args[1].split("_")[1])
+        conn = sqlite3.connect("bot_database.db")
+        cur = conn.cursor()
+        cur.execute("UPDATE appointments SET client_chat_id = ? WHERE id = ?", (message.chat.id, app_id))
+        cur.execute("""
+            SELECT a.service_key, s.date, s.time 
+            FROM appointments a JOIN slots s ON a.slot_id = s.id 
+            WHERE a.id = ?
+        """, (app_id,))
+        res = cur.fetchone()
+        conn.commit()
+        conn.close()
+
+        if res:
+            s_key, d, t = res
+            srv_title = SERVICES[s_key]["title"]
+            await message.answer(
+                f"🌸 **Вы подключили напоминания!**\n\n"
+                f"Жду вас **{d} в {t}** на **{srv_title}** 💅\n"
+                f"📍 Адрес: {ADDRESS}\n\n"
+                f"Я пришлю напоминание за 24 часа и за 2 часа до визита! ✨",
+                parse_mode="Markdown"
+            )
+            return
+
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT date FROM slots WHERE is_booked = 0 ORDER BY id ASC")
+    dates = cur.fetchall()
+    conn.close()
+
+    if not dates:
+        await message.answer("🌸 К сожалению, пока нет свободных окошек. Следите за обновлениями в канале!")
+        return
+
+    buttons = [[InlineKeyboardButton(text=f"🗓 {d[0]}", callback_data=f"cdate_{d[0]}")] for d in dates]
+    await message.answer("🌸 **Добро пожаловать!**\nВыберите удобную дату визита:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+    await state.set_state(ClientBooking.choosing_date)
+
+@dp.callback_query(ClientBooking.choosing_date, F.data.startswith("cdate_"))
+async def client_date_picked(call: types.CallbackQuery, state: FSMContext):
+    chosen_date = call.data.split("_")[1]
+    await state.update_data(chosen_date=chosen_date)
+
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    cur.execute("SELECT id, time FROM slots WHERE date = ? AND is_booked = 0 ORDER BY id ASC", (chosen_date,))
+    times = cur.fetchall()
+    conn.close()
+
+    buttons = [[InlineKeyboardButton(text=f"⏰ {t[1]}", callback_data=f"ctime_{t[0]}_{t[1]}")] for t in times]
+    await call.message.edit_text(f"🗓 Дата: **{chosen_date}**\nВыберите удобное время:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+    await state.set_state(ClientBooking.choosing_time)
+
+@dp.callback_query(ClientBooking.choosing_time, F.data.startswith("ctime_"))
+async def client_time_picked(call: types.CallbackQuery, state: FSMContext):
+    _, slot_id, slot_time = call.data.split("_")
+    await state.update_data(slot_id=int(slot_id), slot_time=slot_time)
+    await call.message.edit_text("✨ Выберите желаемую процедуру:", reply_markup=get_services_kb("cservice"))
+    await state.set_state(ClientBooking.choosing_service)
+
+@dp.callback_query(ClientBooking.choosing_service, F.data.startswith("cservice_"))
+async def client_service_picked(call: types.CallbackQuery, state: FSMContext):
+    service_key = call.data.split("_")[1]
+    await state.update_data(service_key=service_key)
+    await call.message.edit_text("🌸 Введите, пожалуйста, **ваше Имя**:")
+    await state.set_state(ClientBooking.entering_name)
+
+@dp.message(ClientBooking.entering_name)
+async def client_finish(message: types.Message, state: FSMContext):
+    name = message.text.strip()
+    data = await state.get_data()
+    slot_id = data["slot_id"]
+    service_key = data["service_key"]
+    chosen_date = data["chosen_date"]
+    slot_time = data["slot_time"]
+    user_name = f"@{message.from_user.username}" if message.from_user.username else "Без @тега"
+
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    cur.execute("UPDATE slots SET is_booked = 1 WHERE id = ?", (slot_id,))
+    cur.execute("""
+        INSERT INTO appointments (slot_id, client_chat_id, client_name, client_username, service_key, status)
+        VALUES (?, ?, ?, ?, ?, 'booked')
+    """, (slot_id, message.chat.id, name, user_name, service_key))
+    conn.commit()
+    conn.close()
+
+    srv = SERVICES[service_key]
+
+    # Подтверждение клиенту
+    await message.answer(
+        f"🌸 **Вы успешно записаны!**\n\n"
+        f"🗓 **Когда:** {chosen_date} в {slot_time}\n"
+        f"💅 **Процедура:** {srv['title']}\n"
+        f"📍 **Адрес:** {ADDRESS}\n\n"
+        f"*Я напомню вам о встрече за сутки и за 2 часа. До встречи!* ✨",
+        parse_mode="Markdown"
+    )
+
+    # Уведомление мастеру + .ics файл
+    current_year = datetime.now().year
+    day, month = map(int, chosen_date.split("."))
+    hour, minute = map(int, slot_time.split(":"))
+    start_dt = MOSCOW_TZ.localize(datetime(current_year, month, day, hour, minute))
+
+    ics_bytes = generate_ics(srv["title"], name, user_name, start_dt, srv["duration"])
+    ics_file = BufferedInputFile(ics_bytes, filename=f"booking_{chosen_date}_{slot_time}.ics")
+
+    await bot.send_message(
+        chat_id=MASTER_CHAT_ID,
+        text=f"🔔 **Новая онлайн-запись!**\n\n"
+             f"• **Клиент:** {name} ({user_name})\n"
+             f"• **Дата:** {chosen_date} в {slot_time}\n"
+             f"• **Услуга:** {srv['title']}\n"
+             f"• **Длительность:** {srv['duration']} ч.\n\n"
+             f"📎 Файл для добавления в календарь iPhone:",
+        parse_mode="Markdown"
+    )
+    await bot.send_document(chat_id=MASTER_CHAT_ID, document=ics_file)
+    await state.clear()
+
+# --- ПЛАНИРОВЩИК НАПОМИНАНИЙ ---
+async def check_reminders():
+    now = datetime.now(MOSCOW_TZ)
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT a.id, a.client_chat_id, a.client_name, a.service_key, s.date, s.time, a.reminded_24h, a.reminded_2h
+        FROM appointments a
+        JOIN slots s ON a.slot_id = s.id
+        WHERE a.status IN ('booked', 'confirmed') AND a.client_chat_id IS NOT NULL
+    """)
+    records = cur.fetchall()
+
+    current_year = now.year
+    for rec in records:
+        app_id, chat_id, name, s_key, s_date, s_time, rem_24, rem_2 = rec
+        day, month = map(int, s_date.split("."))
+        hour, minute = map(int, s_time.split(":"))
+        app_dt = MOSCOW_TZ.localize(datetime(current_year, month, day, hour, minute))
+
+        time_diff = app_dt - now
+        hours_diff = time_diff.total_seconds() / 3600.0
+        srv_title = SERVICES[s_key]["title"]
+
+        # Напоминание за 24 часа (в интервале 23.5 - 24.5 часов до начала)
+        if 23.5 <= hours_diff <= 24.5 and not rem_24:
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="✅ Буду обязательно", callback_data=f"conf_{app_id}"),
+                InlineKeyboardButton(text="🔄 Отменить / Перенести", callback_data=f"canc_{app_id}")
+            ]])
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"🌸 **Напоминание о записи на завтра!**\n\n"
+                         f"Жду вас завтра в **{s_time}** на процедуру **{srv_title}** 💅\n"
+                         f"📍 Адрес: {ADDRESS}\n\n"
+                         f"Пожалуйста, подтвердите визит:",
+                    reply_markup=kb,
+                    parse_mode="Markdown"
+                )
+                cur.execute("UPDATE appointments SET reminded_24h = 1 WHERE id = ?", (app_id,))
+                conn.commit()
+            except Exception:
+                pass
+
+        # Напоминание за 2 часа (в интервале 1.5 - 2.5 часов)
+        if 1.5 <= hours_diff <= 2.5 and not rem_2:
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="✅ Да, уже собираюсь", callback_data=f"conf_{app_id}"),
+                InlineKeyboardButton(text="⚠️ Не смогу прийти", callback_data=f"canc_{app_id}")
+            ]])
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"☕️ **До нашей встречи осталось 2 часа!**\n\n"
+                         f"Жду вас к **{s_time}** на **{srv_title}** 💅\n"
+                         f"📍 Адрес: {ADDRESS}",
+                    reply_markup=kb,
+                    parse_mode="Markdown"
+                )
+                cur.execute("UPDATE appointments SET reminded_2h = 1 WHERE id = ?", (app_id,))
+                conn.commit()
+            except Exception:
+                pass
+
+    conn.close()
+
+# --- ОБРАБОТЧИКИ КНОПОК НАПОМИНАНИЯ ---
+@dp.callback_query(F.data.startswith("conf_"))
+async def handle_confirm(call: types.CallbackQuery):
+    app_id = int(call.data.split("_")[1])
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    cur.execute("UPDATE appointments SET status = 'confirmed' WHERE id = ?", (app_id,))
+    cur.execute("SELECT client_name, service_key FROM appointments WHERE id = ?", (app_id,))
+    res = cur.fetchone()
+    conn.commit()
+    conn.close()
+
+    await call.message.edit_text(call.message.text + "\n\n✅ **Запись подтверждена! Жду вас ✨**", reply_markup=None)
+    await call.answer("Спасибо за подтверждение!")
+    if res:
+        await bot.send_message(MASTER_CHAT_ID, f"🟢 **Клиент подтвердил запись!**\n👤 {res[0]} ({SERVICES[res[1]]['title']})")
+
+@dp.callback_query(F.data.startswith("canc_"))
+async def handle_cancel(call: types.CallbackQuery):
+    app_id = int(call.data.split("_")[1])
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    cur.execute("SELECT slot_id, client_name, service_key FROM appointments WHERE id = ?", (app_id,))
+    res = cur.fetchone()
+    if res:
+        slot_id, name, s_key = res
+        cur.execute("UPDATE appointments SET status = 'cancelled' WHERE id = ?", (app_id,))
+        cur.execute("UPDATE slots SET is_booked = 0 WHERE id = ?", (slot_id,))
+        cur.execute("SELECT date, time FROM slots WHERE id = ?", (slot_id,))
+        s_date, s_time = cur.fetchone()
+        conn.commit()
+
+        await call.message.edit_text("🤍 **Запись отменена.** Буду рада видеть вас в другой раз!", reply_markup=None)
+        await call.answer("Запись отменена")
+
+        await bot.send_message(
+            MASTER_CHAT_ID,
+            f"🔴 **Внимание: клиент отменил запись!**\n\n"
+            f"👤 {name}\n"
+            f"🗓 Освободилось окно: **{s_date} в {s_time}**\n"
+            f"💅 Была услуга: {SERVICES[s_key]['title']}\n\n"
+            f"*Слот автоматически вернулся в свободные.*",
+            parse_mode="Markdown"
+        )
+    conn.close()
+
+# --- ГЛАВНЫЙ ЗАПУСК ---
+async def main():
+    init_db()
+    scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
+    scheduler.add_job(check_reminders, "interval", minutes=1)
+    scheduler.start()
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
