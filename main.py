@@ -20,9 +20,17 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 # --- НАСТРОЙКИ МАСТЕРА ---
 BOT_TOKEN = "8910204900:AAGw63KIO2BdBagoVHTgRZj9l4vHQsaA5EQ"
 MASTER_CHAT_ID = 1293157140
-CHANNEL_ID = -1001886513960  # ID канала с префиксом -100
+CHANNEL_ID = -1001886513960
 ADDRESS = "ул. Гагарина 232, 1 подъезд, 5 этаж, кв. 12"
 MOSCOW_TZ = pytz.timezone("Europe/Moscow")
+
+MONTH_NAMES_RU = {
+    1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
+    5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
+    9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
+}
+
+STANDARD_TIMES = ["09:00", "10:00", "11:30", "13:00", "14:30", "16:00", "17:30", "19:00"]
 
 SERVICES = {
     "manicure": {"title": "💅 Маникюр", "duration": 2.5},
@@ -63,12 +71,11 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- ГЕНЕРАЦИЯ КАЛЕНДАРЯ (.ICS ДЛЯ IPHONE) ---
+# --- ГЕНЕРАЦИЯ КАЛЕНДАРЯ (.ICS) ---
 def generate_ics(service_title: str, client_name: str, client_contact: str, start_dt: datetime, duration_hours: float) -> bytes:
     cal = Calendar()
     cal.add('prodid', '-//Manicure Booking System//RU')
     cal.add('version', '2.0')
-
     end_dt = start_dt + timedelta(hours=duration_hours)
 
     event = Event()
@@ -78,7 +85,6 @@ def generate_ics(service_title: str, client_name: str, client_contact: str, star
     event.add('dtstart', start_dt)
     event.add('dtend', end_dt)
     cal.add_component(event)
-
     return cal.to_ical()
 
 # --- СОСТОЯНИЯ (FSM) ---
@@ -87,9 +93,6 @@ class ClientBooking(StatesGroup):
     choosing_time = State()
     choosing_service = State()
     entering_name = State()
-
-class AdminAddSlots(StatesGroup):
-    entering_slots = State()
 
 class AdminManualBooking(StatesGroup):
     choosing_slot = State()
@@ -100,7 +103,8 @@ class AdminManualBooking(StatesGroup):
 # --- КЛАВИАТУРЫ ---
 def get_admin_main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Добавить окошки в график", callback_data="admin_add_slots")],
+        [InlineKeyboardButton(text="➕ Добавить окошки (кнопками)", callback_data="admin_pick_date")],
+        [InlineKeyboardButton(text="🗑 Удалить свободные окошки", callback_data="admin_delete_slots_menu")],
         [InlineKeyboardButton(text="📢 Опубликовать график в канал", callback_data="admin_post_channel")],
         [InlineKeyboardButton(text="📝 Записать клиента вручную", callback_data="admin_manual_book")]
     ])
@@ -111,47 +115,134 @@ def get_services_kb(prefix="service"):
         buttons.append([InlineKeyboardButton(text=f"{val['title']} ({val['duration']}ч)", callback_data=f"{prefix}_{key}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# --- ПАНЕЛЬ МАСТЕРА ---
+# --- АДМИН-ПАНЕЛЬ: УПРАВЛЕНИЕ СЛОТАМИ КНОПКАМИ ---
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
     if message.from_user.id != MASTER_CHAT_ID:
         return
     await message.answer("🌸 **Панель управления расписанием**", reply_markup=get_admin_main_kb(), parse_mode="Markdown")
 
-@dp.callback_query(F.data == "admin_add_slots")
-async def admin_add_slots_start(call: types.CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data == "admin_menu")
+async def admin_menu_callback(call: types.CallbackQuery):
     if call.from_user.id != MASTER_CHAT_ID:
         return
-    await call.message.edit_text(
-        "📅 **Введите даты и время окошек** списком в формате `ДД.ММ Время`.\n\n"
-        "Например:\n"
-        "`15.09 10:00`\n"
-        "`15.09 14:00`\n"
-        "`15.09 18:00`\n"
-        "`16.09 12:00`",
-        parse_mode="Markdown"
-    )
-    await state.set_state(AdminAddSlots.entering_slots)
+    await call.message.edit_text("🌸 **Панель управления расписанием**", reply_markup=get_admin_main_kb(), parse_mode="Markdown")
 
-@dp.message(AdminAddSlots.entering_slots)
-async def admin_add_slots_save(message: types.Message, state: FSMContext):
-    if message.from_user.id != MASTER_CHAT_ID:
+@dp.callback_query(F.data == "admin_pick_date")
+async def admin_pick_date(call: types.CallbackQuery):
+    if call.from_user.id != MASTER_CHAT_ID:
         return
-    lines = message.text.strip().split("\n")
+    # Генерируем кнопки на ближайшие 14 дней вперед
+    now = datetime.now(MOSCOW_TZ)
+    buttons = []
+    row = []
+    for i in range(14):
+        d = now + timedelta(days=i)
+        d_str = d.strftime("%d.%m")
+        row.append(InlineKeyboardButton(text=f"🗓 {d_str}", callback_data=f"adate_{d_str}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton(text="⬅️ В главное меню", callback_data="admin_menu")])
+
+    await call.message.edit_text("📅 **Выберите дату**, для которой хотите настроить время:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+
+@dp.callback_query(F.data.startswith("adate_"))
+async def admin_pick_time(call: types.CallbackQuery):
+    if call.from_user.id != MASTER_CHAT_ID:
+        return
+    d_str = call.data.split("_")[1]
+
     conn = sqlite3.connect("bot_database.db")
     cur = conn.cursor()
-    count = 0
-    for line in lines:
-        parts = line.strip().split()
-        if len(parts) == 2:
-            date_str, time_str = parts[0], parts[1]
-            cur.execute("INSERT INTO slots (date, time, is_booked) VALUES (?, ?, 0)", (date_str, time_str))
-            count += 1
+    cur.execute("SELECT time FROM slots WHERE date = ?", (d_str,))
+    existing = [r[0] for r in cur.fetchall()]
+    conn.close()
+
+    buttons = []
+    row = []
+    for t in STANDARD_TIMES:
+        status_icon = "✅" if t in existing else "➕"
+        row.append(InlineKeyboardButton(text=f"{status_icon} {t}", callback_data=f"atoggle_{d_str}_{t}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton(text="⬅️ Выбрать другую дату", callback_data="admin_pick_date")])
+    buttons.append([InlineKeyboardButton(text="✨ Готово (в меню)", callback_data="admin_menu")])
+
+    await call.message.edit_text(
+        f"🗓 Дата: **{d_str}**\n\n"
+        f"Нажимайте на кнопки со временем:\n"
+        f"• **➕ Время** — добавить слот\n"
+        f"• **✅ Время** — слот уже в расписании (нажмите, чтобы убрать)",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="Markdown"
+    )
+
+@dp.callback_query(F.data.startswith("atoggle_"))
+async def admin_toggle_time(call: types.CallbackQuery):
+    if call.from_user.id != MASTER_CHAT_ID:
+        return
+    _, d_str, t_str = call.data.split("_")
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    cur.execute("SELECT id, is_booked FROM slots WHERE date = ? AND time = ?", (d_str, t_str))
+    res = cur.fetchone()
+
+    if res:
+        if res[1] == 1:
+            await call.answer("Этот слот уже занят клиентом! Удалите через отмену записи.", show_alert=True)
+            conn.close()
+            return
+        cur.execute("DELETE FROM slots WHERE id = ?", (res[0],))
+    else:
+        cur.execute("INSERT INTO slots (date, time, is_booked) VALUES (?, ?, 0)", (d_str, t_str))
     conn.commit()
     conn.close()
-    await state.clear()
-    await message.answer(f"✅ Добавлено новых слотов: **{count}**", reply_markup=get_admin_main_kb(), parse_mode="Markdown")
 
+    # Обновляем отображение кнопок
+    await admin_pick_time(call)
+
+# --- УДАЛЕНИЕ СЛОТОВ ---
+@dp.callback_query(F.data == "admin_delete_slots_menu")
+async def admin_delete_menu(call: types.CallbackQuery):
+    if call.from_user.id != MASTER_CHAT_ID:
+        return
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    cur.execute("SELECT id, date, time FROM slots WHERE is_booked = 0 ORDER BY id ASC")
+    slots = cur.fetchall()
+    conn.close()
+
+    if not slots:
+        await call.answer("Нет свободных слотов для удаления!", show_alert=True)
+        return
+
+    buttons = []
+    for sid, d, t in slots:
+        buttons.append([InlineKeyboardButton(text=f"❌ Удалить {d} в {t}", callback_data=f"adelslot_{sid}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ В главное меню", callback_data="admin_menu")])
+
+    await call.message.edit_text("🗑 **Нажмите на слот, который хотите удалить:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+
+@dp.callback_query(F.data.startswith("adelslot_"))
+async def admin_delete_action(call: types.CallbackQuery):
+    if call.from_user.id != MASTER_CHAT_ID:
+        return
+    slot_id = int(call.data.split("_")[1])
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    cur.execute("DELETE FROM slots WHERE id = ? AND is_booked = 0", (slot_id,))
+    conn.commit()
+    conn.close()
+    await call.answer("Слот удален!")
+    await admin_delete_menu(call)
+
+# --- ПУБЛИКАЦИЯ В КАНАЛ ---
 @dp.callback_query(F.data == "admin_post_channel")
 async def admin_post_channel(call: types.CallbackQuery):
     if call.from_user.id != MASTER_CHAT_ID:
@@ -166,11 +257,16 @@ async def admin_post_channel(call: types.CallbackQuery):
         await call.answer("Нет свободных окошек для публикации!", show_alert=True)
         return
 
+    # Определение названия месяца
+    first_date = rows[0][0]
+    month_num = int(first_date.split(".")[1])
+    month_title = MONTH_NAMES_RU.get(month_num, "месяц")
+
     schedule_dict = {}
     for d, t in rows:
         schedule_dict.setdefault(d, []).append(t)
 
-    text = "🌸 **Свободные окошки на процедуры:**\n\n"
+    text = f"🌸 **Свободные окошки на {month_title}:**\n\n"
     for d, times in schedule_dict.items():
         text += f"🗓 **{d}:** {', '.join(times)}\n"
     text += f"\n📍 Адрес: {ADDRESS}\n✨ Жмите на кнопку ниже для быстрой записи:"
@@ -202,6 +298,7 @@ async def admin_manual_start(call: types.CallbackQuery, state: FSMContext):
         return
 
     buttons = [[InlineKeyboardButton(text=f"{d} в {t}", callback_data=f"manslot_{sid}")] for sid, d, t in slots]
+    buttons.append([InlineKeyboardButton(text="⬅️ В главное меню", callback_data="admin_menu")])
     await call.message.edit_text("Выберите слот для записи клиента:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await state.set_state(AdminManualBooking.choosing_slot)
 
@@ -420,7 +517,6 @@ async def check_reminders():
         hours_diff = time_diff.total_seconds() / 3600.0
         srv_title = SERVICES[s_key]["title"]
 
-        # Напоминание за 24 часа
         if 23.5 <= hours_diff <= 24.5 and not rem_24:
             kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="✅ Буду обязательно", callback_data=f"conf_{app_id}"),
@@ -441,7 +537,6 @@ async def check_reminders():
             except Exception:
                 pass
 
-        # Напоминание за 2 часа
         if 1.5 <= hours_diff <= 2.5 and not rem_2:
             kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="✅ Да, уже собираюсь", callback_data=f"conf_{app_id}"),
@@ -509,7 +604,7 @@ async def handle_cancel(call: types.CallbackQuery):
         )
     conn.close()
 
-# --- ВСТРОЕННЫЙ СЕРВЕР ДЛЯ RENDER FREE WEB SERVICE ---
+# --- ВСТРОЕННЫЙ СЕРВЕР ДЛЯ БЕСПЛАТНОГО ТАРИФА RENDER ---
 async def handle_ping(request):
     return web.Response(text="Bot is running 24/7!")
 
