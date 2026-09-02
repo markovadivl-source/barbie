@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 import asyncio
 import calendar
@@ -16,7 +17,8 @@ from aiogram.types import (
     InlineKeyboardButton,
     ReplyKeyboardMarkup,
     KeyboardButton,
-    BufferedInputFile
+    BufferedInputFile,
+    WebAppInfo
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -92,7 +94,7 @@ def generate_ics(service_title: str, client_name: str, client_contact: str, star
     cal.add_component(event)
     return cal.to_ical()
 
-# --- СОСТОЯНИЯ (FSM) ---
+# --- СОСТОЯНИЯ ---
 class ClientBooking(StatesGroup):
     choosing_date = State()
     choosing_time = State()
@@ -105,7 +107,7 @@ class AdminManualBooking(StatesGroup):
     entering_client_name = State()
     entering_client_contact = State()
 
-# --- ПОСТОЯННЫЕ НИЖНИЕ КЛАВИАТУРЫ ---
+# --- КЛАВИАТУРЫ ---
 def get_master_persistent_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -124,7 +126,6 @@ def get_client_persistent_kb():
         is_persistent=True
     )
 
-# --- ИНТЕРАКТИВНОЕ МЕНЮ АДМИНКИ ---
 def get_admin_main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить окошки", callback_data="admin_pick_month")],
@@ -136,11 +137,7 @@ def get_admin_main_kb():
 def build_month_calendar(year: int, month: int):
     month_name = MONTH_NAMES_RU[month]
     cal = calendar.monthcalendar(year, month)
-    
-    buttons = [
-        [InlineKeyboardButton(text=f"🗓 {month_name} {year}", callback_data="ignore")]
-    ]
-    
+    buttons = [[InlineKeyboardButton(text=f"🗓 {month_name} {year}", callback_data="ignore")]]
     week_days = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
     buttons.append([InlineKeyboardButton(text=wd, callback_data="ignore") for wd in week_days])
     
@@ -178,10 +175,7 @@ def get_services_kb(prefix="service"):
 async def show_admin_panel(message: types.Message):
     if message.from_user.id != MASTER_CHAT_ID:
         return
-    await message.answer(
-        "🌸 Панель управления расписанием",
-        reply_markup=get_master_persistent_kb()
-    )
+    await message.answer("🌸 Панель управления расписанием", reply_markup=get_master_persistent_kb())
     await message.answer("Выберите действие:", reply_markup=get_admin_main_kb())
 
 @dp.message(F.text == "📝 Быстрая запись")
@@ -319,7 +313,7 @@ async def admin_delete_action(call: types.CallbackQuery):
     await call.answer("Слот удален!")
     await admin_delete_menu(call)
 
-# --- ПУБЛИКАЦИЯ В КАНАЛ (БЕЗ АДРЕСА) ---
+# --- ПУБЛИКАЦИЯ В КАНАЛ (КНОПКА MINI APP) ---
 @dp.callback_query(F.data == "admin_post_channel")
 async def admin_post_channel(call: types.CallbackQuery):
     if call.from_user.id != MASTER_CHAT_ID:
@@ -345,16 +339,18 @@ async def admin_post_channel(call: types.CallbackQuery):
     text = f"🌸 Свободные окошки на {month_title}:\n\n"
     for d, times in schedule_dict.items():
         text += f"🗓 {d}: {', '.join(times)}\n"
-    text += f"\n✨ Жмите на кнопку ниже для быстрой записи:"
+    text += f"\n✨ Жмите на кнопку ниже для быстрой записи прямо здесь:"
 
-    bot_me = await bot.get_me()
+    # Ссылка на Mini App берется из переменной окружения Render или вшита
+    web_app_url = os.environ.get("RENDER_EXTERNAL_URL", "https://manicure-bot.onrender.com")
+
     channel_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Записаться тут ✨", url=f"https://t.me/{bot_me.username}?start=book")]
+        [InlineKeyboardButton(text="Записаться онлайн ✨", web_app=WebAppInfo(url=web_app_url))]
     ])
 
     try:
         await bot.send_message(chat_id=CHANNEL_ID, text=text, reply_markup=channel_kb)
-        await call.answer("Пост успешно опубликован в канал! 🚀", show_alert=True)
+        await call.answer("Пост с Mini App успешно опубликован в канал! 🚀", show_alert=True)
     except Exception as e:
         await call.answer(f"Ошибка публикации: {e}", show_alert=True)
 
@@ -528,7 +524,6 @@ async def client_check_booking(message: types.Message):
             reply_markup=get_client_persistent_kb()
         )
     else:
-        # Адрес полностью скрыт, только предложение записаться
         await message.answer(
             "У вас пока нет активных записей 🌸\n\n"
             "Чтобы выбрать удобный день и время, нажмите кнопку «💅 Записаться на процедуру» ниже.",
@@ -725,27 +720,115 @@ async def handle_cancel(call: types.CallbackQuery):
         )
     conn.close()
 
-# --- ВСТРОЕННЫЙ СЕРВЕР ДЛЯ FREE WEB SERVICE ---
-async def handle_ping(request):
-    return web.Response(text="Bot is running 24/7!")
+# --- ВЕБ-СЕРВЕР И API ДЛЯ MINI APP ---
+async def handle_index(request):
+    try:
+        with open("index.html", "r", encoding="utf-8") as f:
+            return web.Response(text=f.read(), content_type="text/html")
+    except FileNotFoundError:
+        return web.Response(text="Файл index.html загружается...", content_type="text/plain")
 
-async def run_dummy_server():
+async def handle_get_slots(request):
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    cur.execute("SELECT id, date, time FROM slots WHERE is_booked = 0 ORDER BY id ASC")
+    rows = cur.fetchall()
+    conn.close()
+    slots_data = [{"id": r[0], "date": r[1], "time": r[2]} for r in rows]
+    return web.json_response(slots_data)
+
+async def handle_post_book(request):
+    data = await request.json()
+    slot_id = data.get("slot_id")
+    service_key = data.get("service_key")
+    name = data.get("name")
+    tg_user_id = data.get("tg_user_id")
+    tg_username = data.get("tg_username", "Без @тега")
+
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    cur.execute("SELECT is_booked, date, time FROM slots WHERE id = ?", (slot_id,))
+    slot = cur.fetchone()
+
+    if not slot or slot[0] == 1:
+        conn.close()
+        return web.json_response({"success": False, "message": "Слот уже занят!"})
+
+    # Бронируем
+    cur.execute("UPDATE slots SET is_booked = 1 WHERE id = ?", (slot_id,))
+    cur.execute("""
+        INSERT INTO appointments (slot_id, client_chat_id, client_name, client_username, service_key, status)
+        VALUES (?, ?, ?, ?, ?, 'booked')
+    """, (slot_id, tg_user_id, name, tg_username, service_key))
+    conn.commit()
+    conn.close()
+
+    slot_date, slot_time = slot[1], slot[2]
+    srv = SERVICES[service_key]
+
+    # Генерация .ics файла
+    current_year = datetime.now().year
+    day, month = map(int, slot_date.split("."))
+    hour, minute = map(int, slot_time.split(":"))
+    start_dt = MOSCOW_TZ.localize(datetime(current_year, month, day, hour, minute))
+    ics_bytes = generate_ics(srv["title"], name, tg_username, start_dt, srv["duration"])
+    ics_file = BufferedInputFile(ics_bytes, filename=f"booking_{slot_date}_{slot_time}.ics")
+
+    # Уведомление мастеру
+    await bot.send_message(
+        chat_id=MASTER_CHAT_ID,
+        text=f"🔔 Новая запись через Mini App!\n\n"
+             f"• Клиент: {name} ({tg_username})\n"
+             f"• Дата: {slot_date} в {slot_time}\n"
+             f"• Услуга: {srv['title']}\n"
+             f"• Длительность: {srv['duration']} ч.\n\n"
+             f"📎 Файл для добавления в календарь iPhone:",
+        reply_markup=get_master_persistent_kb()
+    )
+    await bot.send_document(chat_id=MASTER_CHAT_ID, document=ics_file)
+
+    # Если клиент ранее запускал бота — присылаем ему дубликат в чат
+    if tg_user_id:
+        try:
+            await bot.send_message(
+                chat_id=tg_user_id,
+                text=f"🌸 Вы успешно записаны!\n\n"
+                     f"🗓 Когда: {slot_date} в {slot_time}\n"
+                     f"Процедура: {srv['title']}\n"
+                     f"📍 Адрес: {ADDRESS}\n\n"
+                     f"Я напомню вам о встрече за сутки и за 2 часа. До встречи! ✨",
+                reply_markup=get_client_persistent_kb()
+            )
+        except Exception:
+            pass
+
+    return web.json_response({
+        "success": True,
+        "date": slot_date,
+        "time": slot_time,
+        "address": ADDRESS
+    })
+
+async def run_web_server():
     app = web.Application()
-    app.router.add_get("/", handle_ping)
+    app.router.add_get("/", handle_index)
+    app.router.add_get("/api/slots", handle_get_slots)
+    app.router.add_post("/api/book", handle_post_book)
+
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-# --- ЗАПУСК ---
+# --- ЗАПУСК ВСЕЙ СИСТЕМЫ ---
 async def main():
     init_db()
     scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
     scheduler.add_job(check_reminders, "interval", minutes=1)
     scheduler.start()
-    
-    await run_dummy_server()
+
+    await run_web_server()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
