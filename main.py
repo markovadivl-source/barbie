@@ -17,8 +17,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     ReplyKeyboardMarkup,
     KeyboardButton,
-    BufferedInputFile,
-    WebAppInfo
+    BufferedInputFile
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -28,6 +27,9 @@ MASTER_CHAT_ID = 1293157140
 CHANNEL_ID = -1001886513960
 ADDRESS = "ул. Гагарина 232, 1 подъезд, 5 этаж, кв. 12"
 MOSCOW_TZ = pytz.timezone("Europe/Moscow")
+
+# Ваша ссылка на Render для открытия Mini App:
+WEB_APP_URL = "https://manicure-bot-alf6.onrender.com"
 
 MONTH_NAMES_RU = {
     1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
@@ -94,7 +96,7 @@ def generate_ics(service_title: str, client_name: str, client_contact: str, star
     cal.add_component(event)
     return cal.to_ical()
 
-# --- СОСТОЯНИЯ ---
+# --- СОСТОЯНИЯ (FSM) ---
 class ClientBooking(StatesGroup):
     choosing_date = State()
     choosing_time = State()
@@ -107,7 +109,7 @@ class AdminManualBooking(StatesGroup):
     entering_client_name = State()
     entering_client_contact = State()
 
-# --- КЛАВИАТУРЫ ---
+# --- ПОСТОЯННЫЕ НИЖНИЕ КЛАВИАТУРЫ ---
 def get_master_persistent_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -313,7 +315,7 @@ async def admin_delete_action(call: types.CallbackQuery):
     await call.answer("Слот удален!")
     await admin_delete_menu(call)
 
-# --- ПУБЛИКАЦИЯ В КАНАЛ (КНОПКА MINI APP) ---
+# --- ПУБЛИКАЦИЯ В КАНАЛ С ПРЯМОЙ РАБОЧЕЙ КНОПКОЙ ---
 @dp.callback_query(F.data == "admin_post_channel")
 async def admin_post_channel(call: types.CallbackQuery):
     if call.from_user.id != MASTER_CHAT_ID:
@@ -339,18 +341,16 @@ async def admin_post_channel(call: types.CallbackQuery):
     text = f"🌸 Свободные окошки на {month_title}:\n\n"
     for d, times in schedule_dict.items():
         text += f"🗓 {d}: {', '.join(times)}\n"
-    text += f"\n✨ Жмите на кнопку ниже для быстрой записи прямо здесь:"
+    text += f"\n✨ Жмите на кнопку ниже для быстрой записи:"
 
-    # Ссылка на Mini App берется из переменной окружения Render или вшита
-    web_app_url = os.environ.get("RENDER_EXTERNAL_URL", "https://manicure-bot.onrender.com")
-
+    # Прямая защищенная ссылка открывает веб-приложение прямо поверх Telegram
     channel_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Записаться онлайн ✨", web_app=WebAppInfo(url=web_app_url))]
+        [InlineKeyboardButton(text="Записаться онлайн ✨", url=WEB_APP_URL)]
     ])
 
     try:
         await bot.send_message(chat_id=CHANNEL_ID, text=text, reply_markup=channel_kb)
-        await call.answer("Пост с Mini App успешно опубликован в канал! 🚀", show_alert=True)
+        await call.answer("Пост успешно опубликован в канал! 🚀", show_alert=True)
     except Exception as e:
         await call.answer(f"Ошибка публикации: {e}", show_alert=True)
 
@@ -439,7 +439,7 @@ async def admin_manual_finish(message: types.Message, state: FSMContext):
     await bot.send_document(chat_id=MASTER_CHAT_ID, document=ics_file)
     await state.clear()
 
-# --- КЛИЕНТСКИЙ СЦЕНАРИЙ ЗАПИСИ И ПОСТОЯННОЕ МЕНЮ ---
+# --- КЛИЕНТСКИЙ СЦЕНАРИЙ ЗАПИСИ ---
 @dp.message(Command("start"))
 @dp.message(F.text == "💅 Записаться на процедуру")
 async def client_start(message: types.Message, state: FSMContext):
@@ -754,7 +754,6 @@ async def handle_post_book(request):
         conn.close()
         return web.json_response({"success": False, "message": "Слот уже занят!"})
 
-    # Бронируем
     cur.execute("UPDATE slots SET is_booked = 1 WHERE id = ?", (slot_id,))
     cur.execute("""
         INSERT INTO appointments (slot_id, client_chat_id, client_name, client_username, service_key, status)
@@ -774,7 +773,7 @@ async def handle_post_book(request):
     ics_bytes = generate_ics(srv["title"], name, tg_username, start_dt, srv["duration"])
     ics_file = BufferedInputFile(ics_bytes, filename=f"booking_{slot_date}_{slot_time}.ics")
 
-    # Уведомление мастеру
+    # Оповещение мастеру
     await bot.send_message(
         chat_id=MASTER_CHAT_ID,
         text=f"🔔 Новая запись через Mini App!\n\n"
@@ -787,7 +786,6 @@ async def handle_post_book(request):
     )
     await bot.send_document(chat_id=MASTER_CHAT_ID, document=ics_file)
 
-    # Если клиент ранее запускал бота — присылаем ему дубликат в чат
     if tg_user_id:
         try:
             await bot.send_message(
@@ -821,7 +819,7 @@ async def run_web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-# --- ЗАПУСК ВСЕЙ СИСТЕМЫ ---
+# --- ЗАПУСК ---
 async def main():
     init_db()
     scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
