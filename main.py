@@ -14,6 +14,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
     BufferedInputFile
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -103,7 +105,26 @@ class AdminManualBooking(StatesGroup):
     entering_client_name = State()
     entering_client_contact = State()
 
-# --- КЛАВИАТУРЫ АДМИНКИ ---
+# --- ПОСТОЯННЫЕ НИЖНИЕ КЛАВИАТУРЫ ---
+def get_master_persistent_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🌸 Панель управления"), KeyboardButton(text="📝 Быстрая запись")]
+        ],
+        resize_keyboard=True,
+        is_persistent=True
+    )
+
+def get_client_persistent_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="💅 Записаться на процедуру"), KeyboardButton(text="📍 Моя запись / Адрес")]
+        ],
+        resize_keyboard=True,
+        is_persistent=True
+    )
+
+# --- ИНТЕРАКТИВНОЕ МЕНЮ АДМИНКИ ---
 def get_admin_main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить окошки", callback_data="admin_pick_month")],
@@ -151,12 +172,36 @@ def get_services_kb(prefix="service"):
         buttons.append([InlineKeyboardButton(text=f"{val['title']} ({val['duration']}ч)", callback_data=f"{prefix}_{key}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# --- АДМИН-ПАНЕЛЬ ---
+# --- АДМИН-МЕНЮ ---
 @dp.message(Command("admin"))
-async def admin_panel(message: types.Message):
+@dp.message(F.text == "🌸 Панель управления")
+async def show_admin_panel(message: types.Message):
     if message.from_user.id != MASTER_CHAT_ID:
         return
-    await message.answer("🌸 Панель управления расписанием", reply_markup=get_admin_main_kb())
+    await message.answer(
+        "🌸 Панель управления расписанием",
+        reply_markup=get_master_persistent_kb()
+    )
+    await message.answer("Выберите действие:", reply_markup=get_admin_main_kb())
+
+@dp.message(F.text == "📝 Быстрая запись")
+async def quick_manual_book(message: types.Message, state: FSMContext):
+    if message.from_user.id != MASTER_CHAT_ID:
+        return
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    cur.execute("SELECT id, date, time FROM slots WHERE is_booked = 0 ORDER BY id ASC LIMIT 15")
+    slots = cur.fetchall()
+    conn.close()
+
+    if not slots:
+        await message.answer("Нет свободных слотов для записи!")
+        return
+
+    buttons = [[InlineKeyboardButton(text=f"{d} в {t}", callback_data=f"manslot_{sid}")] for sid, d, t in slots]
+    buttons.append([InlineKeyboardButton(text="⬅️ В главное меню", callback_data="admin_menu")])
+    await message.answer("Выберите слот для записи клиента:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await state.set_state(AdminManualBooking.choosing_slot)
 
 @dp.callback_query(F.data == "admin_menu")
 async def admin_menu_callback(call: types.CallbackQuery):
@@ -392,14 +437,23 @@ async def admin_manual_finish(message: types.Message, state: FSMContext):
         f"🗓 {slot_date} в {slot_time}\n"
         f"💅 {srv['title']}\n\n"
         f"🔗 Ссылка для клиента для автонапоминаний:\n{invite_link}\n\n"
-        f"📎 Нажмите на файл ниже на iPhone, чтобы добавить запись в календарь:"
+        f"📎 Нажмите на файл ниже на iPhone, чтобы добавить запись в календарь:",
+        reply_markup=get_master_persistent_kb()
     )
     await bot.send_document(chat_id=MASTER_CHAT_ID, document=ics_file)
     await state.clear()
 
-# --- КЛИЕНТСКИЙ СЦЕНАРИЙ ЗАПИСИ ---
+# --- КЛИЕНТСКИЙ СЦЕНАРИЙ ЗАПИСИ И ПОСТОЯННОЕ МЕНЮ ---
 @dp.message(Command("start"))
+@dp.message(F.text == "💅 Записаться на процедуру")
 async def client_start(message: types.Message, state: FSMContext):
+    # Если пишет мастер — выдаем админское меню
+    if message.from_user.id == MASTER_CHAT_ID:
+        await message.answer("🌸 Панель мастера активна:", reply_markup=get_master_persistent_kb())
+        await message.answer("Выберите действие:", reply_markup=get_admin_main_kb())
+        return
+
+    # Проверка на переход по ссылке ручной записи
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("reg_"):
         app_id = int(args[1].split("_")[1])
@@ -422,10 +476,12 @@ async def client_start(message: types.Message, state: FSMContext):
                 f"🌸 Вы подключили напоминания!\n\n"
                 f"Жду вас {d} в {t} на процедуру: {srv_title}\n"
                 f"📍 Адрес: {ADDRESS}\n\n"
-                f"Я пришлю напоминание за 24 часа и за 2 часа до визита! ✨"
+                f"Я пришлю напоминание за 24 часа и за 2 часа до визита! ✨",
+                reply_markup=get_client_persistent_kb()
             )
             return
 
+    # Обычный старт записи клиентом
     conn = sqlite3.connect("bot_database.db")
     cur = conn.cursor()
     cur.execute("SELECT DISTINCT date FROM slots WHERE is_booked = 0 ORDER BY id ASC")
@@ -433,12 +489,54 @@ async def client_start(message: types.Message, state: FSMContext):
     conn.close()
 
     if not dates:
-        await message.answer("🌸 К сожалению, пока нет свободных окошек. Следите за обновлениями в канале!")
+        await message.answer(
+            "🌸 К сожалению, пока нет свободных окошек. Следите за обновлениями в канале!",
+            reply_markup=get_client_persistent_kb()
+        )
         return
 
     buttons = [[InlineKeyboardButton(text=f"🗓 {d[0]}", callback_data=f"cdate_{d[0]}")] for d in dates]
-    await message.answer("🌸 Добро пожаловать!\nВыберите удобную дату:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await message.answer(
+        "🌸 Добро пожаловать!\nВыберите удобную дату:",
+        reply_markup=get_client_persistent_kb()
+    )
+    await message.answer("Свободные даты:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await state.set_state(ClientBooking.choosing_date)
+
+@dp.message(F.text == "📍 Моя запись / Адрес")
+async def client_check_booking(message: types.Message):
+    if message.from_user.id == MASTER_CHAT_ID:
+        return
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT a.service_key, s.date, s.time 
+        FROM appointments a 
+        JOIN slots s ON a.slot_id = s.id 
+        WHERE a.client_chat_id = ? AND a.status IN ('booked', 'confirmed')
+        ORDER BY a.id DESC LIMIT 1
+    """, (message.chat.id,))
+    res = cur.fetchone()
+    conn.close()
+
+    if res:
+        s_key, d, t = res
+        srv_title = SERVICES[s_key]["title"]
+        await message.answer(
+            f"🌸 Ваша текущая запись:\n\n"
+            f"🗓 Когда: {d} в {t}\n"
+            f"Процедура: {srv_title}\n"
+            f"📍 Адрес: {ADDRESS}\n\n"
+            f"Жду вас! До встречи ✨",
+            reply_markup=get_client_persistent_kb()
+        )
+    else:
+        await message.answer(
+            f"У вас пока нет активных записей.\n"
+            f"📍 Адрес студии: {ADDRESS}\n\n"
+            f"Чтобы выбрать удобное время, нажмите кнопку «💅 Записаться на процедуру» ниже.",
+            reply_markup=get_client_persistent_kb()
+        )
 
 @dp.callback_query(ClientBooking.choosing_date, F.data.startswith("cdate_"))
 async def client_date_picked(call: types.CallbackQuery, state: FSMContext):
@@ -491,13 +589,13 @@ async def client_finish(message: types.Message, state: FSMContext):
 
     srv = SERVICES[service_key]
 
-    # Подтверждение без эмодзи перед названием услуги
     await message.answer(
         f"🌸 Вы успешно записаны!\n\n"
         f"🗓 Когда: {chosen_date} в {slot_time}\n"
         f"Процедура: {srv['title']}\n"
         f"📍 Адрес: {ADDRESS}\n\n"
-        f"Я напомню вам о встрече за сутки и за 2 часа. До встречи! ✨"
+        f"Я напомню вам о встрече за сутки и за 2 часа. До встречи! ✨",
+        reply_markup=get_client_persistent_kb()
     )
 
     current_year = datetime.now().year
@@ -515,7 +613,8 @@ async def client_finish(message: types.Message, state: FSMContext):
              f"• Дата: {chosen_date} в {slot_time}\n"
              f"• Услуга: {srv['title']}\n"
              f"• Длительность: {srv['duration']} ч.\n\n"
-             f"📎 Файл для добавления в календарь iPhone:"
+             f"📎 Файл для добавления в календарь iPhone:",
+        reply_markup=get_master_persistent_kb()
     )
     await bot.send_document(chat_id=MASTER_CHAT_ID, document=ics_file)
     await state.clear()
