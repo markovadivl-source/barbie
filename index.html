@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Онлайн-запись</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background-color: var(--tg-theme-bg-color, #fff);
+      color: var(--tg-theme-text-color, #222);
+      margin: 0; padding: 16px;
+    }
+    h3 { margin-top: 0; font-size: 18px; text-align: center; }
+    .section-title { font-weight: 600; font-size: 14px; margin: 12px 0 6px; color: var(--tg-theme-hint-color, #888); }
+    .chips-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+    .chip {
+      padding: 8px 14px; border-radius: 8px; border: 1px solid var(--tg-theme-button-color, #ff6b81);
+      background: transparent; color: var(--tg-theme-text-color, #222); font-size: 14px; cursor: pointer;
+    }
+    .chip.selected {
+      background: var(--tg-theme-button-color, #ff6b81);
+      color: var(--tg-theme-button-text-color, #fff);
+    }
+    input {
+      width: 100%; box-sizing: border-box; padding: 12px; border-radius: 8px;
+      border: 1px solid #ccc; font-size: 15px; margin-bottom: 16px;
+    }
+    .btn-submit {
+      width: 100%; padding: 14px; border: none; border-radius: 10px;
+      background: var(--tg-theme-button-color, #ff6b81);
+      color: var(--tg-theme-button-text-color, #fff);
+      font-size: 16px; font-weight: 600; cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+
+  <h3>🌸 Онлайн-запись на маникюр</h3>
+
+  <div class="section-title">1. Выберите дату</div>
+  <div class="chips-grid" id="dates-container"></div>
+
+  <div class="section-title">2. Выберите время</div>
+  <div class="chips-grid" id="times-container"></div>
+
+  <div class="section-title">3. Процедура</div>
+  <div class="chips-grid" id="services-container">
+    <div class="chip" data-srv="manicure">Маникюр (2.5ч)</div>
+    <div class="chip" data-srv="pedicure">Педикюр (1.5ч)</div>
+    <div class="chip" data-srv="extension">Наращивание (3.5ч)</div>
+    <div class="chip" data-srv="complex">Комплекс (4ч)</div>
+  </div>
+
+  <div class="section-title">4. Ваше имя</div>
+  <input type="text" id="client-name" placeholder="Как к вам обращаться?">
+
+  <button class="btn-submit" id="submit-booking">Подтвердить запись ✨</button>
+
+  <script>
+    const tg = window.Telegram.WebApp;
+    tg.expand(); // Разворачивает окно на весь экран смартфона
+
+    // Автоподстановка имени клиента из его Telegram-профиля
+    if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
+      const u = tg.initDataUnsafe.user;
+      document.getElementById('client-name').value = [u.first_name, u.last_name].filter(Boolean).join(' ');
+    }
+
+    let selectedDate = null;
+    let selectedSlotId = null;
+    let selectedService = null;
+
+    // Сюда подставляется адрес вашего сервиса на Render
+    const API_URL = "https://manicure-bot-xxxx.onrender.com";
+
+    // Загрузка свободных слотов
+    fetch(`${API_URL}/api/slots`)
+      .then(res => res.json())
+      .then(data => renderSlots(data));
+
+    function renderSlots(slots) {
+      const datesDiv = document.getElementById('dates-container');
+      const uniqueDates = [...new Set(slots.map(s => s.date))];
+
+      uniqueDates.forEach(d => {
+        const btn = document.createElement('div');
+        btn.className = 'chip';
+        btn.innerText = d;
+        btn.onclick = () => {
+          document.querySelectorAll('#dates-container .chip').forEach(c => c.classList.remove('selected'));
+          btn.classList.add('selected');
+          selectedDate = d;
+          renderTimes(slots.filter(s => s.date === d));
+        };
+        datesDiv.appendChild(btn);
+      });
+    }
+
+    function renderTimes(daySlots) {
+      const timesDiv = document.getElementById('times-container');
+      timesDiv.innerHTML = '';
+      daySlots.forEach(s => {
+        const btn = document.createElement('div');
+        btn.className = 'chip';
+        btn.innerText = s.time;
+        btn.onclick = () => {
+          document.querySelectorAll('#times-container .chip').forEach(c => c.classList.remove('selected'));
+          btn.classList.add('selected');
+          selectedSlotId = s.id;
+        };
+        timesDiv.appendChild(btn);
+      });
+    }
+
+    // Выбор услуги
+    document.querySelectorAll('#services-container .chip').forEach(btn => {
+      btn.onclick = () => {
+        document.querySelectorAll('#services-container .chip').forEach(c => c.classList.remove('selected'));
+        btn.classList.add('selected');
+        selectedService = btn.getAttribute('data-srv');
+      };
+    });
+
+    // Отправка бронирования
+    document.getElementById('submit-booking').onclick = async () => {
+      const name = document.getElementById('client-name').value.trim();
+      if (!selectedSlotId || !selectedService || !name) {
+        tg.showAlert("Пожалуйста, выберите дату, время, процедуру и укажите имя.");
+        return;
+      }
+
+      const payload = {
+        slot_id: selectedSlotId,
+        service_key: selectedService,
+        name: name,
+        user_id: tg.initDataUnsafe?.user?.id || null,
+        username: tg.initDataUnsafe?.user?.username ? `@${tg.initDataUnsafe.user.username}` : "Без тега"
+      };
+
+      const res = await fetch(`${API_URL}/api/book`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      if (res.ok) {
+        tg.showAlert("Вы успешно записаны! Ждём вас 🌸", () => {
+          tg.close(); // Закрывает Mini App, клиент остаётся в канале
+        });
+      } else {
+        tg.showAlert("Ой, это время только что заняли. Попробуйте выбрать другое окно.");
+      }
+    };
+  </script>
+</body>
+</html>
