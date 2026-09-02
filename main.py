@@ -31,16 +31,15 @@ MONTH_NAMES_RU = {
     9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
 }
 
-# Сетка времени с шагом каждые полчаса
 STANDARD_TIMES = [
     f"{h:02d}:{m:02d}" for h in range(8, 22) for m in (0, 30)
-]  # 08:00, 08:30 ... 21:00, 21:30
+]
 
 SERVICES = {
-    "manicure": {"title": "💅 Маникюр", "duration": 2.5},
-    "pedicure": {"title": "🦶 Педикюр", "duration": 1.5},
-    "extension": {"title": "✨ Наращивание / Коррекция", "duration": 3.5},
-    "complex": {"title": "🌸 Маникюр + Педикюр", "duration": 4.0},
+    "manicure": {"title": "Маникюр", "duration": 2.5},
+    "pedicure": {"title": "Педикюр", "duration": 1.5},
+    "extension": {"title": "Наращивание / Коррекция", "duration": 3.5},
+    "complex": {"title": "Маникюр + Педикюр", "duration": 4.0},
 }
 
 bot = Bot(token=BOT_TOKEN)
@@ -157,27 +156,27 @@ def get_services_kb(prefix="service"):
 async def admin_panel(message: types.Message):
     if message.from_user.id != MASTER_CHAT_ID:
         return
-    await message.answer("🌸 **Панель управления расписанием**", reply_markup=get_admin_main_kb(), parse_mode="Markdown")
+    await message.answer("🌸 Панель управления расписанием", reply_markup=get_admin_main_kb())
 
 @dp.callback_query(F.data == "admin_menu")
 async def admin_menu_callback(call: types.CallbackQuery):
     if call.from_user.id != MASTER_CHAT_ID:
         return
-    await call.message.edit_text("🌸 **Панель управления расписанием**", reply_markup=get_admin_main_kb(), parse_mode="Markdown")
+    await call.message.edit_text("🌸 Панель управления расписанием", reply_markup=get_admin_main_kb())
 
 @dp.callback_query(F.data == "admin_pick_month")
 async def admin_pick_month(call: types.CallbackQuery):
     if call.from_user.id != MASTER_CHAT_ID:
         return
     now = datetime.now(MOSCOW_TZ)
-    await call.message.edit_text("📅 **Выберите день в календаре:**", reply_markup=build_month_calendar(now.year, now.month), parse_mode="Markdown")
+    await call.message.edit_text("📅 Выберите день в календаре:", reply_markup=build_month_calendar(now.year, now.month))
 
 @dp.callback_query(F.data.startswith("acal_"))
 async def admin_change_calendar_month(call: types.CallbackQuery):
     if call.from_user.id != MASTER_CHAT_ID:
         return
     _, y_str, m_str = call.data.split("_")
-    await call.message.edit_text("📅 **Выберите день в календаре:**", reply_markup=build_month_calendar(int(y_str), int(m_str)), parse_mode="Markdown")
+    await call.message.edit_text("📅 Выберите день в календаре:", reply_markup=build_month_calendar(int(y_str), int(m_str)))
 
 @dp.callback_query(F.data.startswith("adate_"))
 async def admin_pick_time(call: types.CallbackQuery):
@@ -198,7 +197,7 @@ async def admin_pick_time(call: types.CallbackQuery):
     for t in STANDARD_TIMES:
         status_icon = "✅" if t in existing else "➕"
         row.append(InlineKeyboardButton(text=f"{status_icon} {t}", callback_data=f"atoggle_{d_str}_{t}_{year_str}"))
-        if len(row) == 3:  # Сетка по 3 кнопки в ряд для шага в 30 мин
+        if len(row) == 3:
             buttons.append(row)
             row = []
     if row:
@@ -209,12 +208,11 @@ async def admin_pick_time(call: types.CallbackQuery):
     buttons.append([InlineKeyboardButton(text="✨ Готово (в главное меню)", callback_data="admin_menu")])
 
     await call.message.edit_text(
-        f"🗓 Дата: **{d_str}**\n\n"
+        f"🗓 Дата: {d_str}\n\n"
         f"• Нажимайте на время с шагом 30 минут:\n"
-        f"• **➕** — добавить окошко\n"
-        f"• **✅** — удалить выставленное окошко",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-        parse_mode="Markdown"
+        f"• ➕ — добавить окошко\n"
+        f"• ✅ — удалить выставленное окошко",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
 
 @dp.callback_query(F.data.startswith("atoggle_"))
@@ -261,7 +259,7 @@ async def admin_delete_menu(call: types.CallbackQuery):
         buttons.append([InlineKeyboardButton(text=f"❌ Удалить {d} в {t}", callback_data=f"adelslot_{sid}")])
     buttons.append([InlineKeyboardButton(text="⬅️ В главное меню", callback_data="admin_menu")])
 
-    await call.message.edit_text("🗑 **Нажмите на слот, который хотите удалить:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+    await call.message.edit_text("🗑 Нажмите на слот, который хотите удалить:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 @dp.callback_query(F.data.startswith("adelslot_"))
 async def admin_delete_action(call: types.CallbackQuery):
@@ -276,7 +274,7 @@ async def admin_delete_action(call: types.CallbackQuery):
     await call.answer("Слот удален!")
     await admin_delete_menu(call)
 
-# --- ПУБЛИКАЦИЯ В КАНАЛ ---
+# --- ПУБЛИКАЦИЯ В КАНАЛ (БЕЗ АДРЕСА) ---
 @dp.callback_query(F.data == "admin_post_channel")
 async def admin_post_channel(call: types.CallbackQuery):
     if call.from_user.id != MASTER_CHAT_ID:
@@ -299,10 +297,10 @@ async def admin_post_channel(call: types.CallbackQuery):
     for d, t in rows:
         schedule_dict.setdefault(d, []).append(t)
 
-    text = f"🌸 **Свободные окошки на {month_title}:**\n\n"
+    text = f"🌸 Свободные окошки на {month_title}:\n\n"
     for d, times in schedule_dict.items():
-        text += f"🗓 **{d}:** {', '.join(times)}\n"
-    text += f"\n📍 Адрес: {ADDRESS}\n✨ Жмите на кнопку ниже для быстрой записи:"
+        text += f"🗓 {d}: {', '.join(times)}\n"
+    text += f"\n✨ Жмите на кнопку ниже для быстрой записи:"
 
     bot_me = await bot.get_me()
     channel_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -310,7 +308,7 @@ async def admin_post_channel(call: types.CallbackQuery):
     ])
 
     try:
-        await bot.send_message(chat_id=CHANNEL_ID, text=text, reply_markup=channel_kb, parse_mode="Markdown")
+        await bot.send_message(chat_id=CHANNEL_ID, text=text, reply_markup=channel_kb)
         await call.answer("Пост успешно опубликован в канал! 🚀", show_alert=True)
     except Exception as e:
         await call.answer(f"Ошибка публикации: {e}", show_alert=True)
@@ -346,13 +344,13 @@ async def admin_manual_slot_picked(call: types.CallbackQuery, state: FSMContext)
 async def admin_manual_service_picked(call: types.CallbackQuery, state: FSMContext):
     service_key = call.data.split("_")[1]
     await state.update_data(service_key=service_key)
-    await call.message.edit_text("Введите **Имя клиента**:")
+    await call.message.edit_text("Введите имя клиента:")
     await state.set_state(AdminManualBooking.entering_client_name)
 
 @dp.message(AdminManualBooking.entering_client_name)
 async def admin_manual_name_entered(message: types.Message, state: FSMContext):
     await state.update_data(client_name=message.text.strip())
-    await message.answer("Введите **контакт клиента** (@username или телефон):")
+    await message.answer("Введите контакт клиента (@username или телефон):")
     await state.set_state(AdminManualBooking.entering_client_contact)
 
 @dp.message(AdminManualBooking.entering_client_contact)
@@ -389,13 +387,12 @@ async def admin_manual_finish(message: types.Message, state: FSMContext):
     ics_file = BufferedInputFile(ics_bytes, filename=f"booking_{slot_date}_{slot_time}.ics")
 
     await message.answer(
-        f"✅ **Клиент успешно записан!**\n\n"
+        f"✅ Клиент успешно записан!\n\n"
         f"👤 {name} ({contact})\n"
         f"🗓 {slot_date} в {slot_time}\n"
         f"💅 {srv['title']}\n\n"
-        f"🔗 Ссылка для клиента для автонапоминаний:\n`{invite_link}`\n\n"
-        f"📎 Нажмите на файл ниже на iPhone, чтобы добавить запись в календарь:",
-        parse_mode="Markdown"
+        f"🔗 Ссылка для клиента для автонапоминаний:\n{invite_link}\n\n"
+        f"📎 Нажмите на файл ниже на iPhone, чтобы добавить запись в календарь:"
     )
     await bot.send_document(chat_id=MASTER_CHAT_ID, document=ics_file)
     await state.clear()
@@ -422,11 +419,10 @@ async def client_start(message: types.Message, state: FSMContext):
             s_key, d, t = res
             srv_title = SERVICES[s_key]["title"]
             await message.answer(
-                f"🌸 **Вы подключили напоминания!**\n\n"
-                f"Жду вас **{d} в {t}** на **{srv_title}** 💅\n"
+                f"🌸 Вы подключили напоминания!\n\n"
+                f"Жду вас {d} в {t} на процедуру: {srv_title}\n"
                 f"📍 Адрес: {ADDRESS}\n\n"
-                f"Я пришлю напоминание за 24 часа и за 2 часа до визита! ✨",
-                parse_mode="Markdown"
+                f"Я пришлю напоминание за 24 часа и за 2 часа до визита! ✨"
             )
             return
 
@@ -441,7 +437,7 @@ async def client_start(message: types.Message, state: FSMContext):
         return
 
     buttons = [[InlineKeyboardButton(text=f"🗓 {d[0]}", callback_data=f"cdate_{d[0]}")] for d in dates]
-    await message.answer("🌸 **Добро пожаловать!**\nВыберите удобную дату визита:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+    await message.answer("🌸 Добро пожаловать!\nВыберите удобную дату:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await state.set_state(ClientBooking.choosing_date)
 
 @dp.callback_query(ClientBooking.choosing_date, F.data.startswith("cdate_"))
@@ -456,7 +452,7 @@ async def client_date_picked(call: types.CallbackQuery, state: FSMContext):
     conn.close()
 
     buttons = [[InlineKeyboardButton(text=f"⏰ {t[1]}", callback_data=f"ctime_{t[0]}_{t[1]}")] for t in times]
-    await call.message.edit_text(f"🗓 Дата: **{chosen_date}**\nВыберите удобное время:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+    await call.message.edit_text(f"🗓 Дата: {chosen_date}\nВыберите удобное время:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await state.set_state(ClientBooking.choosing_time)
 
 @dp.callback_query(ClientBooking.choosing_time, F.data.startswith("ctime_"))
@@ -470,7 +466,7 @@ async def client_time_picked(call: types.CallbackQuery, state: FSMContext):
 async def client_service_picked(call: types.CallbackQuery, state: FSMContext):
     service_key = call.data.split("_")[1]
     await state.update_data(service_key=service_key)
-    await call.message.edit_text("🌸 Введите, пожалуйста, **ваше Имя**:")
+    await call.message.edit_text("🌸 Введите, пожалуйста, ваше имя:")
     await state.set_state(ClientBooking.entering_name)
 
 @dp.message(ClientBooking.entering_name)
@@ -495,13 +491,13 @@ async def client_finish(message: types.Message, state: FSMContext):
 
     srv = SERVICES[service_key]
 
+    # Подтверждение без эмодзи перед названием услуги
     await message.answer(
-        f"🌸 **Вы успешно записаны!**\n\n"
-        f"🗓 **Когда:** {chosen_date} в {slot_time}\n"
-        f"💅 **Процедура:** {srv['title']}\n"
-        f"📍 **Адрес:** {ADDRESS}\n\n"
-        f"*Я напомню вам о встрече за сутки и за 2 часа. До встречи!* ✨",
-        parse_mode="Markdown"
+        f"🌸 Вы успешно записаны!\n\n"
+        f"🗓 Когда: {chosen_date} в {slot_time}\n"
+        f"Процедура: {srv['title']}\n"
+        f"📍 Адрес: {ADDRESS}\n\n"
+        f"Я напомню вам о встрече за сутки и за 2 часа. До встречи! ✨"
     )
 
     current_year = datetime.now().year
@@ -514,13 +510,12 @@ async def client_finish(message: types.Message, state: FSMContext):
 
     await bot.send_message(
         chat_id=MASTER_CHAT_ID,
-        text=f"🔔 **Новая онлайн-запись!**\n\n"
-             f"• **Клиент:** {name} ({user_name})\n"
-             f"• **Дата:** {chosen_date} в {slot_time}\n"
-             f"• **Услуга:** {srv['title']}\n"
-             f"• **Длительность:** {srv['duration']} ч.\n\n"
-             f"📎 Файл для добавления в календарь iPhone:",
-        parse_mode="Markdown"
+        text=f"🔔 Новая онлайн-запись!\n\n"
+             f"• Клиент: {name} ({user_name})\n"
+             f"• Дата: {chosen_date} в {slot_time}\n"
+             f"• Услуга: {srv['title']}\n"
+             f"• Длительность: {srv['duration']} ч.\n\n"
+             f"📎 Файл для добавления в календарь iPhone:"
     )
     await bot.send_document(chat_id=MASTER_CHAT_ID, document=ics_file)
     await state.clear()
@@ -558,12 +553,11 @@ async def check_reminders():
             try:
                 await bot.send_message(
                     chat_id=chat_id,
-                    text=f"🌸 **Напоминание о записи на завтра!**\n\n"
-                         f"Жду вас завтра в **{s_time}** на процедуру **{srv_title}** 💅\n"
+                    text=f"🌸 Напоминание о записи на завтра!\n\n"
+                         f"Жду вас завтра в {s_time} на процедуру: {srv_title}\n"
                          f"📍 Адрес: {ADDRESS}\n\n"
                          f"Пожалуйста, подтвердите визит:",
-                    reply_markup=kb,
-                    parse_mode="Markdown"
+                    reply_markup=kb
                 )
                 cur.execute("UPDATE appointments SET reminded_24h = 1 WHERE id = ?", (app_id,))
                 conn.commit()
@@ -578,11 +572,10 @@ async def check_reminders():
             try:
                 await bot.send_message(
                     chat_id=chat_id,
-                    text=f"☕️ **До нашей встречи осталось 2 часа!**\n\n"
-                         f"Жду вас к **{s_time}** на **{srv_title}** 💅\n"
+                    text=f"☕️ До нашей встречи осталось 2 часа!\n\n"
+                         f"Жду вас к {s_time} на процедуру: {srv_title}\n"
                          f"📍 Адрес: {ADDRESS}",
-                    reply_markup=kb,
-                    parse_mode="Markdown"
+                    reply_markup=kb
                 )
                 cur.execute("UPDATE appointments SET reminded_2h = 1 WHERE id = ?", (app_id,))
                 conn.commit()
@@ -603,10 +596,10 @@ async def handle_confirm(call: types.CallbackQuery):
     conn.commit()
     conn.close()
 
-    await call.message.edit_text(call.message.text + "\n\n✅ **Запись подтверждена! Жду вас ✨**", reply_markup=None)
+    await call.message.edit_text(call.message.text + "\n\n✅ Запись подтверждена! Жду вас ✨", reply_markup=None)
     await call.answer("Спасибо за подтверждение!")
     if res:
-        await bot.send_message(MASTER_CHAT_ID, f"🟢 **Клиент подтвердил запись!**\n👤 {res[0]} ({SERVICES[res[1]]['title']})")
+        await bot.send_message(MASTER_CHAT_ID, f"🟢 Клиент подтвердил запись!\n👤 {res[0]} ({SERVICES[res[1]]['title']})")
 
 @dp.callback_query(F.data.startswith("canc_"))
 async def handle_cancel(call: types.CallbackQuery):
@@ -623,17 +616,16 @@ async def handle_cancel(call: types.CallbackQuery):
         s_date, s_time = cur.fetchone()
         conn.commit()
 
-        await call.message.edit_text("🤍 **Запись отменена.** Буду рада видеть вас в другой раз!", reply_markup=None)
+        await call.message.edit_text("🤍 Запись отменена. Буду рада видеть вас в другой раз!", reply_markup=None)
         await call.answer("Запись отменена")
 
         await bot.send_message(
             MASTER_CHAT_ID,
-            f"🔴 **Внимание: клиент отменил запись!**\n\n"
+            f"🔴 Внимание: клиент отменил запись!\n\n"
             f"👤 {name}\n"
-            f"🗓 Освободилось окно: **{s_date} в {s_time}**\n"
-            f"💅 Была услуга: {SERVICES[s_key]['title']}\n\n"
-            f"*Слот автоматически вернулся в свободные.*",
-            parse_mode="Markdown"
+            f"🗓 Освободилось окно: {s_date} в {s_time}\n"
+            f"Была услуга: {SERVICES[s_key]['title']}\n\n"
+            f"Слот автоматически вернулся в свободные."
         )
     conn.close()
 
