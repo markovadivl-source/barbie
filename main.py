@@ -447,13 +447,11 @@ async def admin_manual_finish(message: types.Message, state: FSMContext):
 @dp.message(Command("start"))
 @dp.message(F.text == "💅 Записаться на процедуру")
 async def client_start(message: types.Message, state: FSMContext):
-    # Если пишет мастер — выдаем админское меню
     if message.from_user.id == MASTER_CHAT_ID:
         await message.answer("🌸 Панель мастера активна:", reply_markup=get_master_persistent_kb())
         await message.answer("Выберите действие:", reply_markup=get_admin_main_kb())
         return
 
-    # Проверка на переход по ссылке ручной записи
     args = message.text.split()
     if len(args) > 1 and args[1].startswith("reg_"):
         app_id = int(args[1].split("_")[1])
@@ -481,7 +479,6 @@ async def client_start(message: types.Message, state: FSMContext):
             )
             return
 
-    # Обычный старт записи клиентом
     conn = sqlite3.connect("bot_database.db")
     cur = conn.cursor()
     cur.execute("SELECT DISTINCT date FROM slots WHERE is_booked = 0 ORDER BY id ASC")
@@ -531,10 +528,10 @@ async def client_check_booking(message: types.Message):
             reply_markup=get_client_persistent_kb()
         )
     else:
+        # Адрес полностью скрыт, только предложение записаться
         await message.answer(
-            f"У вас пока нет активных записей.\n"
-            f"📍 Адрес студии: {ADDRESS}\n\n"
-            f"Чтобы выбрать удобное время, нажмите кнопку «💅 Записаться на процедуру» ниже.",
+            "У вас пока нет активных записей 🌸\n\n"
+            "Чтобы выбрать удобный день и время, нажмите кнопку «💅 Записаться на процедуру» ниже.",
             reply_markup=get_client_persistent_kb()
         )
 
