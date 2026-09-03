@@ -2,119 +2,142 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Онлайн-запись</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
+    :root {
+      --primary: #ff6b81;
+      --primary-hover: #ff4757;
+      --bg: #ffffff;
+      --text: #222222;
+      --hint: #888888;
+      --card-bg: #f7f7f7;
+    }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background-color: var(--tg-theme-bg-color, #fff);
-      color: var(--tg-theme-text-color, #222);
+      background-color: var(--bg);
+      color: var(--text);
       margin: 0; padding: 16px;
+      touch-action: manipulation;
     }
-    h3 { margin-top: 0; font-size: 18px; text-align: center; }
-    .section-title { font-weight: 600; font-size: 14px; margin: 12px 0 6px; color: var(--tg-theme-hint-color, #888); }
-    .chips-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+    h3 { margin-top: 4px; font-size: 19px; text-align: center; }
+    .section-title { font-weight: 600; font-size: 13px; margin: 16px 0 8px; color: var(--hint); text-transform: uppercase; }
+    .chips-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
     .chip {
-      padding: 8px 14px; border-radius: 8px; border: 1px solid var(--tg-theme-button-color, #ff6b81);
-      background: transparent; color: var(--tg-theme-text-color, #222); font-size: 14px; cursor: pointer;
+      padding: 10px 14px; border-radius: 10px; border: 1px solid #e0e0e0;
+      background: var(--card-bg); color: var(--text); font-size: 14px; font-weight: 500;
+      cursor: pointer; user-select: none;
     }
     .chip.selected {
-      background: var(--tg-theme-button-color, #ff6b81);
-      color: var(--tg-theme-button-text-color, #fff);
+      background: var(--primary) !important;
+      color: #ffffff !important;
+      border-color: var(--primary) !important;
     }
     input {
-      width: 100%; box-sizing: border-box; padding: 12px; border-radius: 8px;
-      border: 1px solid #ccc; font-size: 15px; margin-bottom: 16px;
+      width: 100%; box-sizing: border-box; padding: 12px 14px; border-radius: 10px;
+      border: 1px solid #e0e0e0; font-size: 15px; margin-bottom: 20px;
+      background: var(--card-bg); color: var(--text); outline: none;
     }
     .btn-submit {
-      width: 100%; padding: 14px; border: none; border-radius: 10px;
-      background: var(--tg-theme-button-color, #ff6b81);
-      color: var(--tg-theme-button-text-color, #fff);
+      width: 100%; padding: 15px; border: none; border-radius: 12px;
+      background: var(--primary); color: #ffffff;
       font-size: 16px; font-weight: 600; cursor: pointer;
     }
+    .loader { text-align: center; padding: 15px; color: var(--hint); font-size: 14px; }
   </style>
 </head>
 <body>
 
-  <h3>🌸 Онлайн-запись на маникюр</h3>
+  <h3>🌸 Онлайн-запись</h3>
 
   <div class="section-title">1. Выберите дату</div>
+  <div id="loader" class="loader">Загрузка свободных окошек...</div>
   <div class="chips-grid" id="dates-container"></div>
+  <div id="empty-view" style="display: none; text-align: center; color: var(--hint); padding: 15px 0;">Пока нет свободных слотов.</div>
 
   <div class="section-title">2. Выберите время</div>
-  <div class="chips-grid" id="times-container"></div>
+  <div class="chips-grid" id="times-container">
+    <span style="font-size: 13px; color: var(--hint);">Сначала выберите дату выше 👆</span>
+  </div>
 
   <div class="section-title">3. Процедура</div>
   <div class="chips-grid" id="services-container">
     <div class="chip" data-srv="manicure">Маникюр (2.5ч)</div>
     <div class="chip" data-srv="pedicure">Педикюр (1.5ч)</div>
     <div class="chip" data-srv="extension">Наращивание (3.5ч)</div>
-    <div class="chip" data-srv="complex">Комплекс (4ч)</div>
+    <div class="chip" data-srv="complex">Маникюр + Педикюр (4ч)</div>
   </div>
 
   <div class="section-title">4. Ваше имя</div>
-  <input type="text" id="client-name" placeholder="Как к вам обращаться?">
+  <input type="text" id="client-name" placeholder="Как вас зовут?">
 
-  <button class="btn-submit" id="submit-booking">Подтвердить запись ✨</button>
+  <button class="btn-submit" id="submit-booking">Записаться ✨</button>
 
   <script>
-    const tg = window.Telegram.WebApp;
-    tg.expand(); // Разворачивает окно на весь экран смартфона
-
-    // Автоподстановка имени клиента из его Telegram-профиля
-    if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
-      const u = tg.initDataUnsafe.user;
-      document.getElementById('client-name').value = [u.first_name, u.last_name].filter(Boolean).join(' ');
+    const tg = window.Telegram?.WebApp;
+    if (tg) {
+      tg.ready();
+      tg.expand();
+      if (tg.initDataUnsafe?.user) {
+        const u = tg.initDataUnsafe.user;
+        document.getElementById('client-name').value = [u.first_name, u.last_name].filter(Boolean).join(' ');
+      }
     }
 
-    let selectedDate = null;
+    let allSlots = [];
     let selectedSlotId = null;
     let selectedService = null;
 
-    // Сюда подставляется адрес вашего сервиса на Render
-    const API_URL = "https://manicure-bot-xxxx.onrender.com";
+    async function loadSlots() {
+      try {
+        const res = await fetch('/api/slots');
+        allSlots = await res.json();
+        document.getElementById('loader').style.display = 'none';
 
-    // Загрузка свободных слотов
-    fetch(`${API_URL}/api/slots`)
-      .then(res => res.json())
-      .then(data => renderSlots(data));
+        if (!allSlots.length) {
+          document.getElementById('empty-view').style.display = 'block';
+          return;
+        }
 
-    function renderSlots(slots) {
-      const datesDiv = document.getElementById('dates-container');
-      const uniqueDates = [...new Set(slots.map(s => s.date))];
+        const datesContainer = document.getElementById('dates-container');
+        const uniqueDates = [...new Set(allSlots.map(s => s.date))];
 
-      uniqueDates.forEach(d => {
-        const btn = document.createElement('div');
-        btn.className = 'chip';
-        btn.innerText = d;
-        btn.onclick = () => {
-          document.querySelectorAll('#dates-container .chip').forEach(c => c.classList.remove('selected'));
-          btn.classList.add('selected');
-          selectedDate = d;
-          renderTimes(slots.filter(s => s.date === d));
-        };
-        datesDiv.appendChild(btn);
-      });
+        uniqueDates.forEach(d => {
+          const btn = document.createElement('div');
+          btn.className = 'chip';
+          btn.innerText = `🗓 ${d}`;
+          btn.onclick = () => {
+            document.querySelectorAll('#dates-container .chip').forEach(c => c.classList.remove('selected'));
+            btn.classList.add('selected');
+            renderTimes(d);
+          };
+          datesContainer.appendChild(btn);
+        });
+      } catch (err) {
+        document.getElementById('loader').innerText = 'Ошибка загрузки слотов';
+      }
     }
 
-    function renderTimes(daySlots) {
-      const timesDiv = document.getElementById('times-container');
-      timesDiv.innerHTML = '';
+    function renderTimes(date) {
+      const timesContainer = document.getElementById('times-container');
+      timesContainer.innerHTML = '';
+      selectedSlotId = null;
+
+      const daySlots = allSlots.filter(s => s.date === date);
       daySlots.forEach(s => {
         const btn = document.createElement('div');
         btn.className = 'chip';
-        btn.innerText = s.time;
+        btn.innerText = `⏰ ${s.time}`;
         btn.onclick = () => {
           document.querySelectorAll('#times-container .chip').forEach(c => c.classList.remove('selected'));
           btn.classList.add('selected');
           selectedSlotId = s.id;
         };
-        timesDiv.appendChild(btn);
+        timesContainer.appendChild(btn);
       });
     }
 
-    // Выбор услуги
     document.querySelectorAll('#services-container .chip').forEach(btn => {
       btn.onclick = () => {
         document.querySelectorAll('#services-container .chip').forEach(c => c.classList.remove('selected'));
@@ -123,11 +146,10 @@
       };
     });
 
-    // Отправка бронирования
     document.getElementById('submit-booking').onclick = async () => {
       const name = document.getElementById('client-name').value.trim();
       if (!selectedSlotId || !selectedService || !name) {
-        tg.showAlert("Пожалуйста, выберите дату, время, процедуру и укажите имя.");
+        alert("Пожалуйста, укажите дату, время, процедуру и ваше имя!");
         return;
       }
 
@@ -135,24 +157,30 @@
         slot_id: selectedSlotId,
         service_key: selectedService,
         name: name,
-        user_id: tg.initDataUnsafe?.user?.id || null,
-        username: tg.initDataUnsafe?.user?.username ? `@${tg.initDataUnsafe.user.username}` : "Без тега"
+        tg_user_id: tg?.initDataUnsafe?.user?.id || null,
+        tg_username: tg?.initDataUnsafe?.user?.username ? `@${tg.initDataUnsafe.user.username}` : "Без @тега"
       };
 
-      const res = await fetch(`${API_URL}/api/book`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-
-      if (res.ok) {
-        tg.showAlert("Вы успешно записаны! Ждём вас 🌸", () => {
-          tg.close(); // Закрывает Mini App, клиент остаётся в канале
+      try {
+        const res = await fetch('/api/book', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
         });
-      } else {
-        tg.showAlert("Ой, это время только что заняли. Попробуйте выбрать другое окно.");
+        const result = await res.json();
+
+        if (result.success) {
+          alert(`Вы успешно записаны! 🌸\nЖду вас ${result.date} в ${result.time}\nАдрес: ${result.address}`);
+          if (tg) tg.close();
+        } else {
+          alert(result.message || "Это время уже занято.");
+        }
+      } catch (err) {
+        alert("Ошибка при отправке данных. Попробуйте еще раз.");
       }
     };
+
+    loadSlots();
   </script>
 </body>
 </html>
