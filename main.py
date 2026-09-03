@@ -28,9 +28,6 @@ CHANNEL_ID = -1001886513960
 ADDRESS = "ул. Гагарина 232, 1 подъезд, 5 этаж, кв. 12"
 MOSCOW_TZ = pytz.timezone("Europe/Moscow")
 
-# Ваша ссылка на Render для открытия Mini App:
-WEB_APP_URL = "https://manicure-bot-alf6.onrender.com"
-
 MONTH_NAMES_RU = {
     1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
     5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
@@ -80,6 +77,13 @@ def init_db():
     conn.commit()
     conn.close()
 
+# Хелпер хронологической сортировки слотов (от раннего к позднему)
+def sort_key_slot(item):
+    d_str, t_str = item[0], item[1]
+    day, month = map(int, d_str.split("."))
+    hour, minute = map(int, t_str.split(":"))
+    return (month, day, hour, minute)
+
 # --- ГЕНЕРАЦИЯ КАЛЕНДАРЯ (.ICS) ---
 def generate_ics(service_title: str, client_name: str, client_contact: str, start_dt: datetime, duration_hours: float) -> bytes:
     cal = Calendar()
@@ -96,7 +100,7 @@ def generate_ics(service_title: str, client_name: str, client_contact: str, star
     cal.add_component(event)
     return cal.to_ical()
 
-# --- СОСТОЯНИЯ (FSM) ---
+# --- СОСТОЯНИЯ ---
 class ClientBooking(StatesGroup):
     choosing_date = State()
     choosing_time = State()
@@ -109,7 +113,7 @@ class AdminManualBooking(StatesGroup):
     entering_client_name = State()
     entering_client_contact = State()
 
-# --- ПОСТОЯННЫЕ НИЖНИЕ КЛАВИАТУРЫ ---
+# --- КЛАВИАТУРЫ ---
 def get_master_persistent_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -186,13 +190,17 @@ async def quick_manual_book(message: types.Message, state: FSMContext):
         return
     conn = sqlite3.connect("bot_database.db")
     cur = conn.cursor()
-    cur.execute("SELECT id, date, time FROM slots WHERE is_booked = 0 ORDER BY id ASC LIMIT 15")
+    cur.execute("SELECT id, date, time FROM slots WHERE is_booked = 0")
     slots = cur.fetchall()
     conn.close()
 
     if not slots:
         await message.answer("Нет свободных слотов для записи!")
         return
+
+    # Хронологическая сортировка
+    slots.sort(key=lambda x: (int(x[1].split(".")[1]), int(x[1].split(".")[0]), int(x[2].split(":")[0]), int(x[2].split(":")[1])))
+    slots = slots[:15]
 
     buttons = [[InlineKeyboardButton(text=f"{d} в {t}", callback_data=f"manslot_{sid}")] for sid, d, t in slots]
     buttons.append([InlineKeyboardButton(text="⬅️ В главное меню", callback_data="admin_menu")])
@@ -287,13 +295,16 @@ async def admin_delete_menu(call: types.CallbackQuery):
         return
     conn = sqlite3.connect("bot_database.db")
     cur = conn.cursor()
-    cur.execute("SELECT id, date, time FROM slots WHERE is_booked = 0 ORDER BY id ASC")
+    cur.execute("SELECT id, date, time FROM slots WHERE is_booked = 0")
     slots = cur.fetchall()
     conn.close()
 
     if not slots:
         await call.answer("Нет свободных слотов для удаления!", show_alert=True)
         return
+
+    # Хронологическая сортировка
+    slots.sort(key=lambda x: (int(x[1].split(".")[1]), int(x[1].split(".")[0]), int(x[2].split(":")[0]), int(x[2].split(":")[1])))
 
     buttons = []
     for sid, d, t in slots:
@@ -315,20 +326,23 @@ async def admin_delete_action(call: types.CallbackQuery):
     await call.answer("Слот удален!")
     await admin_delete_menu(call)
 
-# --- ПУБЛИКАЦИЯ В КАНАЛ С ПРЯМОЙ РАБОЧЕЙ КНОПКОЙ ---
+# --- ПУБЛИКАЦИЯ В КАНАЛ С СОРТИРОВКОЙ 1, 2, 3... ---
 @dp.callback_query(F.data == "admin_post_channel")
 async def admin_post_channel(call: types.CallbackQuery):
     if call.from_user.id != MASTER_CHAT_ID:
         return
     conn = sqlite3.connect("bot_database.db")
     cur = conn.cursor()
-    cur.execute("SELECT date, time FROM slots WHERE is_booked = 0 ORDER BY id ASC")
+    cur.execute("SELECT date, time FROM slots WHERE is_booked = 0")
     rows = cur.fetchall()
     conn.close()
 
     if not rows:
         await call.answer("Нет свободных окошек для публикации!", show_alert=True)
         return
+
+    # Строгая сортировка от раннего к позднему
+    rows.sort(key=sort_key_slot)
 
     first_date = rows[0][0]
     month_num = int(first_date.split(".")[1])
@@ -343,9 +357,12 @@ async def admin_post_channel(call: types.CallbackQuery):
         text += f"🗓 {d}: {', '.join(times)}\n"
     text += f"\n✨ Жмите на кнопку ниже для быстрой записи:"
 
-    # Прямая защищенная ссылка открывает веб-приложение прямо поверх Telegram
+    bot_me = await bot.get_me()
+    # Ссылка на Mini App через инлайн-приложение BotFather открывается шторкой
+    app_url = f"https://t.me/{bot_me.username}/book"
+
     channel_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Записаться онлайн ✨", url=WEB_APP_URL)]
+        [InlineKeyboardButton(text="Записаться онлайн ✨", url=app_url)]
     ])
 
     try:
@@ -361,13 +378,16 @@ async def admin_manual_start(call: types.CallbackQuery, state: FSMContext):
         return
     conn = sqlite3.connect("bot_database.db")
     cur = conn.cursor()
-    cur.execute("SELECT id, date, time FROM slots WHERE is_booked = 0 ORDER BY id ASC LIMIT 15")
+    cur.execute("SELECT id, date, time FROM slots WHERE is_booked = 0")
     slots = cur.fetchall()
     conn.close()
 
     if not slots:
         await call.answer("Нет свободных слотов!", show_alert=True)
         return
+
+    slots.sort(key=lambda x: (int(x[1].split(".")[1]), int(x[1].split(".")[0]), int(x[2].split(":")[0]), int(x[2].split(":")[1])))
+    slots = slots[:15]
 
     buttons = [[InlineKeyboardButton(text=f"{d} в {t}", callback_data=f"manslot_{sid}")] for sid, d, t in slots]
     buttons.append([InlineKeyboardButton(text="⬅️ В главное меню", callback_data="admin_menu")])
@@ -477,18 +497,21 @@ async def client_start(message: types.Message, state: FSMContext):
 
     conn = sqlite3.connect("bot_database.db")
     cur = conn.cursor()
-    cur.execute("SELECT DISTINCT date FROM slots WHERE is_booked = 0 ORDER BY id ASC")
-    dates = cur.fetchall()
+    cur.execute("SELECT DISTINCT date, '00:00' FROM slots WHERE is_booked = 0")
+    dates_raw = cur.fetchall()
     conn.close()
 
-    if not dates:
+    if not dates_raw:
         await message.answer(
             "🌸 К сожалению, пока нет свободных окошек. Следите за обновлениями в канале!",
             reply_markup=get_client_persistent_kb()
         )
         return
 
-    buttons = [[InlineKeyboardButton(text=f"🗓 {d[0]}", callback_data=f"cdate_{d[0]}")] for d in dates]
+    dates_raw.sort(key=sort_key_slot)
+    dates = [d[0] for d in dates_raw]
+
+    buttons = [[InlineKeyboardButton(text=f"🗓 {d}", callback_data=f"cdate_{d}")] for d in dates]
     await message.answer(
         "🌸 Добро пожаловать!\nВыберите удобную дату:",
         reply_markup=get_client_persistent_kb()
@@ -537,9 +560,11 @@ async def client_date_picked(call: types.CallbackQuery, state: FSMContext):
 
     conn = sqlite3.connect("bot_database.db")
     cur = conn.cursor()
-    cur.execute("SELECT id, time FROM slots WHERE date = ? AND is_booked = 0 ORDER BY id ASC", (chosen_date,))
+    cur.execute("SELECT id, time FROM slots WHERE date = ? AND is_booked = 0", (chosen_date,))
     times = cur.fetchall()
     conn.close()
+
+    times.sort(key=lambda x: (int(x[1].split(":")[0]), int(x[1].split(":")[1])))
 
     buttons = [[InlineKeyboardButton(text=f"⏰ {t[1]}", callback_data=f"ctime_{t[0]}_{t[1]}")] for t in times]
     await call.message.edit_text(f"🗓 Дата: {chosen_date}\nВыберите удобное время:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
@@ -731,9 +756,12 @@ async def handle_index(request):
 async def handle_get_slots(request):
     conn = sqlite3.connect("bot_database.db")
     cur = conn.cursor()
-    cur.execute("SELECT id, date, time FROM slots WHERE is_booked = 0 ORDER BY id ASC")
+    cur.execute("SELECT id, date, time FROM slots WHERE is_booked = 0")
     rows = cur.fetchall()
     conn.close()
+
+    # Сортировка слотов для Mini App строго по календарю
+    rows.sort(key=lambda r: sort_key_slot((r[1], r[2])))
     slots_data = [{"id": r[0], "date": r[1], "time": r[2]} for r in rows]
     return web.json_response(slots_data)
 
@@ -765,7 +793,6 @@ async def handle_post_book(request):
     slot_date, slot_time = slot[1], slot[2]
     srv = SERVICES[service_key]
 
-    # Генерация .ics файла
     current_year = datetime.now().year
     day, month = map(int, slot_date.split("."))
     hour, minute = map(int, slot_time.split(":"))
@@ -773,7 +800,6 @@ async def handle_post_book(request):
     ics_bytes = generate_ics(srv["title"], name, tg_username, start_dt, srv["duration"])
     ics_file = BufferedInputFile(ics_bytes, filename=f"booking_{slot_date}_{slot_time}.ics")
 
-    # Оповещение мастеру
     await bot.send_message(
         chat_id=MASTER_CHAT_ID,
         text=f"🔔 Новая запись через Mini App!\n\n"
@@ -819,7 +845,7 @@ async def run_web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-# --- ЗАПУСК ---
+# --- ЗАПУСК ВСЕЙ СИСТЕМЫ ---
 async def main():
     init_db()
     scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
