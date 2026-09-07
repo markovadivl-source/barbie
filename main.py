@@ -28,6 +28,8 @@ CHANNEL_ID = -1001886513960
 ADDRESS = "ул. Гагарина 232, 1 подъезд, 5 этаж, кв. 12"
 MOSCOW_TZ = pytz.timezone("Europe/Moscow")
 
+WEB_APP_URL = "https://manicure-bot-alf6.onrender.com"
+
 MONTH_NAMES_RU = {
     1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
     5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
@@ -74,15 +76,91 @@ def init_db():
             FOREIGN KEY (slot_id) REFERENCES slots(id)
         )
     """)
+    # Таблица для хранения ID сообщения с постом расписания
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS channel_posts (
+            key TEXT PRIMARY KEY,
+            message_id INTEGER
+        )
+    """)
     conn.commit()
     conn.close()
 
-# Хелпер хронологической сортировки слотов (от раннего к позднему)
 def sort_key_slot(item):
     d_str, t_str = item[0], item[1]
     day, month = map(int, d_str.split("."))
     hour, minute = map(int, t_str.split(":"))
     return (month, day, hour, minute)
+
+# --- ФУНКЦИЯ АВТОМАТИЧЕСКОГО ОБНОВЛЕНИЯ / РЕДАКТИРОВАНИЯ ПОСТА В КАНАЛЕ ---
+async def sync_channel_schedule_post():
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    cur.execute("SELECT date, time FROM slots WHERE is_booked = 0")
+    rows = cur.fetchall()
+
+    cur.execute("SELECT message_id FROM channel_posts WHERE key = 'schedule_post'")
+    post_record = cur.fetchone()
+    current_post_id = post_record[0] if post_record else None
+
+    # Если свободных слотов нет
+    if not rows:
+        text = "🌸 Свободных окошек на данный момент нет.\nСледите за обновлениями в канале!"
+        reply_kb = None
+    else:
+        rows.sort(key=sort_key_slot)
+        first_date = rows[0][0]
+        month_num = int(first_date.split(".")[1])
+        month_title = MONTH_NAMES_RU.get(month_num, "месяц")
+
+        schedule_dict = {}
+        for d, t in rows:
+            schedule_dict.setdefault(d, []).append(t)
+
+        text = f"🌸 Свободные окошки на {month_title}:\n\n"
+        for d, times in schedule_dict.items():
+            text += f"🗓 {d}: {', '.join(times)}\n"
+        text += f"\n✨ Жмите на кнопку ниже для быстрой записи:"
+
+        bot_me = await bot.get_me()
+        app_url = f"https://t.me/{bot_me.username}/book"
+        reply_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Записаться онлайн ✨", url=app_url)]
+        ])
+
+    # Пытаемся отредактировать уже существующий пост
+    edited_successfully = False
+    if current_post_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=CHANNEL_ID,
+                message_id=current_post_id,
+                text=text,
+                reply_markup=reply_kb
+            )
+            edited_successfully = True
+        except Exception:
+            # Если пост был удален из канала вручную — публикуем заново
+            edited_successfully = False
+
+    # Если поста еще не было или не удалось отредактировать — отправляем новый и запоминаем его ID
+    if not edited_successfully and rows:
+        try:
+            sent_msg = await bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=text,
+                reply_markup=reply_kb
+            )
+            cur.execute("""
+                INSERT INTO channel_posts (key, message_id)
+                VALUES ('schedule_post', ?)
+                ON CONFLICT(key) DO UPDATE SET message_id = excluded.message_id
+            """, (sent_msg.message_id,))
+            conn.commit()
+        except Exception as e:
+            print(f"Ошибка публикации в канал: {e}")
+
+    conn.close()
 
 # --- ГЕНЕРАЦИЯ КАЛЕНДАРЯ (.ICS) ---
 def generate_ics(service_title: str, client_name: str, client_contact: str, start_dt: datetime, duration_hours: float) -> bytes:
@@ -136,7 +214,7 @@ def get_admin_main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить окошки", callback_data="admin_pick_month")],
         [InlineKeyboardButton(text="🗑 Удалить свободные окошки", callback_data="admin_delete_slots_menu")],
-        [InlineKeyboardButton(text="📢 Опубликовать график в канал", callback_data="admin_post_channel")],
+        [InlineKeyboardButton(text="📢 Опубликовать/Обновить график в канале", callback_data="admin_post_channel")],
         [InlineKeyboardButton(text="📝 Записать клиента вручную", callback_data="admin_manual_book")]
     ])
 
@@ -198,7 +276,6 @@ async def quick_manual_book(message: types.Message, state: FSMContext):
         await message.answer("Нет свободных слотов для записи!")
         return
 
-    # Хронологическая сортировка
     slots.sort(key=lambda x: (int(x[1].split(".")[1]), int(x[1].split(".")[0]), int(x[2].split(":")[0]), int(x[2].split(":")[1])))
     slots = slots[:15]
 
@@ -286,6 +363,9 @@ async def admin_toggle_time(call: types.CallbackQuery):
     conn.commit()
     conn.close()
 
+    # Сразу фоном обновляем пост в канале
+    asyncio.create_task(sync_channel_schedule_post())
+
     await admin_pick_time(call)
 
 # --- УДАЛЕНИЕ СЛОТОВ ---
@@ -303,7 +383,6 @@ async def admin_delete_menu(call: types.CallbackQuery):
         await call.answer("Нет свободных слотов для удаления!", show_alert=True)
         return
 
-    # Хронологическая сортировка
     slots.sort(key=lambda x: (int(x[1].split(".")[1]), int(x[1].split(".")[0]), int(x[2].split(":")[0]), int(x[2].split(":")[1])))
 
     buttons = []
@@ -324,52 +403,19 @@ async def admin_delete_action(call: types.CallbackQuery):
     conn.commit()
     conn.close()
     await call.answer("Слот удален!")
+
+    # Фоном обновляем сообщение в канале
+    asyncio.create_task(sync_channel_schedule_post())
+
     await admin_delete_menu(call)
 
-# --- ПУБЛИКАЦИЯ В КАНАЛ С СОРТИРОВКОЙ 1, 2, 3... ---
+# --- КНОПКА ПРИНУДИТЕЛЬНОЙ ПУБЛИКАЦИИ / ОБНОВЛЕНИЯ ГРАФИКА ---
 @dp.callback_query(F.data == "admin_post_channel")
 async def admin_post_channel(call: types.CallbackQuery):
     if call.from_user.id != MASTER_CHAT_ID:
         return
-    conn = sqlite3.connect("bot_database.db")
-    cur = conn.cursor()
-    cur.execute("SELECT date, time FROM slots WHERE is_booked = 0")
-    rows = cur.fetchall()
-    conn.close()
-
-    if not rows:
-        await call.answer("Нет свободных окошек для публикации!", show_alert=True)
-        return
-
-    # Строгая сортировка от раннего к позднему
-    rows.sort(key=sort_key_slot)
-
-    first_date = rows[0][0]
-    month_num = int(first_date.split(".")[1])
-    month_title = MONTH_NAMES_RU.get(month_num, "месяц")
-
-    schedule_dict = {}
-    for d, t in rows:
-        schedule_dict.setdefault(d, []).append(t)
-
-    text = f"🌸 Свободные окошки на {month_title}:\n\n"
-    for d, times in schedule_dict.items():
-        text += f"🗓 {d}: {', '.join(times)}\n"
-    text += f"\n✨ Жмите на кнопку ниже для быстрой записи:"
-
-    bot_me = await bot.get_me()
-    # Ссылка на Mini App через инлайн-приложение BotFather открывается шторкой
-    app_url = f"https://t.me/{bot_me.username}/book"
-
-    channel_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Записаться онлайн ✨", url=app_url)]
-    ])
-
-    try:
-        await bot.send_message(chat_id=CHANNEL_ID, text=text, reply_markup=channel_kb)
-        await call.answer("Пост успешно опубликован в канал! 🚀", show_alert=True)
-    except Exception as e:
-        await call.answer(f"Ошибка публикации: {e}", show_alert=True)
+    await sync_channel_schedule_post()
+    await call.answer("График в канале успешно обновлен! 🚀", show_alert=True)
 
 # --- РУЧНАЯ ЗАПИСЬ МАСТЕРОМ ---
 @dp.callback_query(F.data == "admin_manual_book")
@@ -434,6 +480,9 @@ async def admin_manual_finish(message: types.Message, state: FSMContext):
     slot_date, slot_time = cur.fetchone()
     conn.commit()
     conn.close()
+
+    # Обновляем пост в канале (занятый слот автоматически исчезнет)
+    asyncio.create_task(sync_channel_schedule_post())
 
     bot_me = await bot.get_me()
     invite_link = f"https://t.me/{bot_me.username}?start=reg_{app_id}"
@@ -604,6 +653,9 @@ async def client_finish(message: types.Message, state: FSMContext):
     conn.commit()
     conn.close()
 
+    # Сразу редактируем пост в канале (слот удаляется из списка)
+    asyncio.create_task(sync_channel_schedule_post())
+
     srv = SERVICES[service_key]
 
     await message.answer(
@@ -732,6 +784,9 @@ async def handle_cancel(call: types.CallbackQuery):
         s_date, s_time = cur.fetchone()
         conn.commit()
 
+        # Пост в канале автоматически обновляется (освобожденный слот возвращается в список)
+        asyncio.create_task(sync_channel_schedule_post())
+
         await call.message.edit_text("🤍 Запись отменена. Буду рада видеть вас в другой раз!", reply_markup=None)
         await call.answer("Запись отменена")
 
@@ -741,7 +796,7 @@ async def handle_cancel(call: types.CallbackQuery):
             f"👤 {name}\n"
             f"🗓 Освободилось окно: {s_date} в {s_time}\n"
             f"Была услуга: {SERVICES[s_key]['title']}\n\n"
-            f"Слот автоматически вернулся в свободные."
+            f"Слот автоматически вернулся в график и обновился в посте канала."
         )
     conn.close()
 
@@ -760,7 +815,6 @@ async def handle_get_slots(request):
     rows = cur.fetchall()
     conn.close()
 
-    # Сортировка слотов для Mini App строго по календарю
     rows.sort(key=lambda r: sort_key_slot((r[1], r[2])))
     slots_data = [{"id": r[0], "date": r[1], "time": r[2]} for r in rows]
     return web.json_response(slots_data)
@@ -789,6 +843,9 @@ async def handle_post_book(request):
     """, (slot_id, tg_user_id, name, tg_username, service_key))
     conn.commit()
     conn.close()
+
+    # Сразу редактируем пост в канале (слот удаляется из списка)
+    asyncio.create_task(sync_channel_schedule_post())
 
     slot_date, slot_time = slot[1], slot[2]
     srv = SERVICES[service_key]
@@ -845,7 +902,7 @@ async def run_web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-# --- ЗАПУСК ВСЕЙ СИСТЕМЫ ---
+# --- ЗАПУСК ---
 async def main():
     init_db()
     scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
