@@ -76,7 +76,6 @@ def init_db():
             FOREIGN KEY (slot_id) REFERENCES slots(id)
         )
     """)
-    # Таблица для хранения ID сообщения с постом расписания
     cur.execute("""
         CREATE TABLE IF NOT EXISTS channel_posts (
             key TEXT PRIMARY KEY,
@@ -92,7 +91,7 @@ def sort_key_slot(item):
     hour, minute = map(int, t_str.split(":"))
     return (month, day, hour, minute)
 
-# --- ФУНКЦИЯ АВТОМАТИЧЕСКОГО ОБНОВЛЕНИЯ / РЕДАКТИРОВАНИЯ ПОСТА В КАНАЛЕ ---
+# --- АВТОМАТИЧЕСКОЕ ОБНОВЛЕНИЕ ПОСТА В КАНАЛЕ ---
 async def sync_channel_schedule_post():
     conn = sqlite3.connect("bot_database.db")
     cur = conn.cursor()
@@ -103,7 +102,6 @@ async def sync_channel_schedule_post():
     post_record = cur.fetchone()
     current_post_id = post_record[0] if post_record else None
 
-    # Если свободных слотов нет
     if not rows:
         text = "🌸 Свободных окошек на данный момент нет.\nСледите за обновлениями в канале!"
         reply_kb = None
@@ -128,7 +126,6 @@ async def sync_channel_schedule_post():
             [InlineKeyboardButton(text="Записаться онлайн ✨", url=app_url)]
         ])
 
-    # Пытаемся отредактировать уже существующий пост
     edited_successfully = False
     if current_post_id:
         try:
@@ -140,10 +137,8 @@ async def sync_channel_schedule_post():
             )
             edited_successfully = True
         except Exception:
-            # Если пост был удален из канала вручную — публикуем заново
             edited_successfully = False
 
-    # Если поста еще не было или не удалось отредактировать — отправляем новый и запоминаем его ID
     if not edited_successfully and rows:
         try:
             sent_msg = await bot.send_message(
@@ -212,8 +207,10 @@ def get_client_persistent_kb():
 
 def get_admin_main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Актуальные записи", callback_data="admin_view_appointments")],
         [InlineKeyboardButton(text="➕ Добавить окошки", callback_data="admin_pick_month")],
         [InlineKeyboardButton(text="🗑 Удалить свободные окошки", callback_data="admin_delete_slots_menu")],
+        [InlineKeyboardButton(text="❌ Отменить запись клиента", callback_data="admin_cancel_app_menu")],
         [InlineKeyboardButton(text="📢 Опубликовать/Обновить график в канале", callback_data="admin_post_channel")],
         [InlineKeyboardButton(text="📝 Записать клиента вручную", callback_data="admin_manual_book")]
     ])
@@ -252,6 +249,41 @@ def get_services_kb(prefix="service"):
     for key, val in SERVICES.items():
         buttons.append([InlineKeyboardButton(text=f"{val['title']} ({val['duration']}ч)", callback_data=f"{prefix}_{key}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+# --- ПРОСМОТР АКТУАЛЬНЫХ ЗАПИСЕЙ ---
+@dp.callback_query(F.data == "admin_view_appointments")
+async def admin_view_appointments(call: types.CallbackQuery):
+    if call.from_user.id != MASTER_CHAT_ID:
+        return
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT a.client_name, a.client_username, s.date, s.time, a.service_key, a.status
+        FROM appointments a
+        JOIN slots s ON a.slot_id = s.id
+        WHERE a.status IN ('booked', 'confirmed')
+    """)
+    apps = cur.fetchall()
+    conn.close()
+
+    if not apps:
+        await call.answer("На данный момент активных записей нет 🌸", show_alert=True)
+        return
+
+    # Сортировка записей хронологически
+    apps.sort(key=lambda x: (int(x[2].split(".")[1]), int(x[2].split(".")[0]), int(x[3].split(":")[0]), int(x[3].split(":")[1])))
+
+    text = "📋 Список актуальных записей:\n\n"
+    for name, username, d, t, s_key, status in apps:
+        srv_title = SERVICES.get(s_key, {}).get("title", "Процедура")
+        contact = f" ({username})" if username and username != "Без @тега" else ""
+        status_icon = "🟢" if status == "confirmed" else "🟡"
+        text += f"{status_icon} 🗓 {d} в {t}\n👤 {name}{contact}\n💅 {srv_title}\n\n"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="admin_menu")]
+    ])
+    await call.message.edit_text(text, reply_markup=kb)
 
 # --- АДМИН-МЕНЮ ---
 @dp.message(Command("admin"))
@@ -354,7 +386,7 @@ async def admin_toggle_time(call: types.CallbackQuery):
 
     if res:
         if res[1] == 1:
-            await call.answer("Этот слот уже занят клиентом!", show_alert=True)
+            await call.answer("Этот слот занят клиентом! Для отмены используйте «Отменить запись клиента».", show_alert=True)
             conn.close()
             return
         cur.execute("DELETE FROM slots WHERE id = ?", (res[0],))
@@ -363,12 +395,10 @@ async def admin_toggle_time(call: types.CallbackQuery):
     conn.commit()
     conn.close()
 
-    # Сразу фоном обновляем пост в канале
     asyncio.create_task(sync_channel_schedule_post())
-
     await admin_pick_time(call)
 
-# --- УДАЛЕНИЕ СЛОТОВ ---
+# --- УДАЛЕНИЕ СВОБОДНЫХ СЛОТОВ ---
 @dp.callback_query(F.data == "admin_delete_slots_menu")
 async def admin_delete_menu(call: types.CallbackQuery):
     if call.from_user.id != MASTER_CHAT_ID:
@@ -390,7 +420,7 @@ async def admin_delete_menu(call: types.CallbackQuery):
         buttons.append([InlineKeyboardButton(text=f"❌ Удалить {d} в {t}", callback_data=f"adelslot_{sid}")])
     buttons.append([InlineKeyboardButton(text="⬅️ В главное меню", callback_data="admin_menu")])
 
-    await call.message.edit_text("🗑 Нажмите на слот, который хотите удалить:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await call.message.edit_text("🗑 Нажмите на слот, который хотите удалить из графика:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 @dp.callback_query(F.data.startswith("adelslot_"))
 async def admin_delete_action(call: types.CallbackQuery):
@@ -404,12 +434,90 @@ async def admin_delete_action(call: types.CallbackQuery):
     conn.close()
     await call.answer("Слот удален!")
 
-    # Фоном обновляем сообщение в канале
     asyncio.create_task(sync_channel_schedule_post())
-
     await admin_delete_menu(call)
 
-# --- КНОПКА ПРИНУДИТЕЛЬНОЙ ПУБЛИКАЦИИ / ОБНОВЛЕНИЯ ГРАФИКА ---
+# --- ОТМЕНА ЗАПИСИ КЛИЕНТА СО СТОРОНЫ МАСТЕРА ---
+@dp.callback_query(F.data == "admin_cancel_app_menu")
+async def admin_cancel_app_menu(call: types.CallbackQuery):
+    if call.from_user.id != MASTER_CHAT_ID:
+        return
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT a.id, a.client_name, a.client_username, s.date, s.time, a.service_key
+        FROM appointments a
+        JOIN slots s ON a.slot_id = s.id
+        WHERE a.status IN ('booked', 'confirmed')
+    """)
+    apps = cur.fetchall()
+    conn.close()
+
+    if not apps:
+        await call.answer("Нет активных записей клиентов для отмены!", show_alert=True)
+        return
+
+    apps.sort(key=lambda x: (int(x[3].split(".")[1]), int(x[3].split(".")[0]), int(x[4].split(":")[0]), int(x[4].split(":")[1])))
+
+    buttons = []
+    for aid, name, username, d, t, _ in apps:
+        contact_display = username if username and username != "Без @тега" else name
+        buttons.append([InlineKeyboardButton(text=f"❌ {d} в {t} — {contact_display}", callback_data=f"adm_canc_{aid}")])
+    buttons.append([InlineKeyboardButton(text="⬅️ В главное меню", callback_data="admin_menu")])
+
+    await call.message.edit_text(
+        "Выберите запись, которую хотите отменить:\n\n"
+        "• Окно вернется в свободные слоты\n"
+        "• Пост в канале обновится\n"
+        "• Клиент получит уведомление об отмене",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+
+@dp.callback_query(F.data.startswith("adm_canc_"))
+async def admin_cancel_app_action(call: types.CallbackQuery):
+    if call.from_user.id != MASTER_CHAT_ID:
+        return
+    app_id = int(call.data.split("_")[2])
+    conn = sqlite3.connect("bot_database.db")
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT a.slot_id, a.client_chat_id, a.client_name, s.date, s.time, a.service_key
+        FROM appointments a
+        JOIN slots s ON a.slot_id = s.id
+        WHERE a.id = ?
+    """, (app_id,))
+    res = cur.fetchone()
+
+    if not res:
+        await call.answer("Запись уже не найдена или была отменена.", show_alert=True)
+        conn.close()
+        await admin_menu_callback(call)
+        return
+
+    slot_id, client_chat_id, client_name, s_date, s_time, s_key = res
+    cur.execute("UPDATE appointments SET status = 'cancelled_by_master' WHERE id = ?", (app_id,))
+    cur.execute("UPDATE slots SET is_booked = 0 WHERE id = ?", (slot_id,))
+    conn.commit()
+    conn.close()
+
+    asyncio.create_task(sync_channel_schedule_post())
+
+    if client_chat_id:
+        try:
+            await bot.send_message(
+                chat_id=client_chat_id,
+                text=f"🌸 Уведомление об отмене записи:\n\n"
+                     f"Ваша запись на {s_date} в {s_time} ({SERVICES[s_key]['title']}) была отменена мастером.\n\n"
+                     f"Чтобы подобрать другое удобное время, нажмите «💅 Записаться на процедуру».",
+                reply_markup=get_client_persistent_kb()
+            )
+        except Exception:
+            pass
+
+    await call.answer(f"Запись {client_name} на {s_date} {s_time} отменена!", show_alert=True)
+    await admin_cancel_app_menu(call)
+
+# --- КНОПКА ОБНОВЛЕНИЯ ГРАФИКА В КАНАЛЕ ---
 @dp.callback_query(F.data == "admin_post_channel")
 async def admin_post_channel(call: types.CallbackQuery):
     if call.from_user.id != MASTER_CHAT_ID:
@@ -481,7 +589,6 @@ async def admin_manual_finish(message: types.Message, state: FSMContext):
     conn.commit()
     conn.close()
 
-    # Обновляем пост в канале (занятый слот автоматически исчезнет)
     asyncio.create_task(sync_channel_schedule_post())
 
     bot_me = await bot.get_me()
@@ -653,7 +760,6 @@ async def client_finish(message: types.Message, state: FSMContext):
     conn.commit()
     conn.close()
 
-    # Сразу редактируем пост в канале (слот удаляется из списка)
     asyncio.create_task(sync_channel_schedule_post())
 
     srv = SERVICES[service_key]
@@ -752,7 +858,7 @@ async def check_reminders():
 
     conn.close()
 
-# --- ОБРАБОТЧИКИ КНОПОК ПОДТВЕРЖДЕНИЯ И ОТМЕНЫ ---
+# --- ОБРАБОТЧИКИ КНОПОК ПОДТВЕРЖДЕНИЯ И ОТМЕНЫ СО СТОРОНЫ КЛИЕНТА ---
 @dp.callback_query(F.data.startswith("conf_"))
 async def handle_confirm(call: types.CallbackQuery):
     app_id = int(call.data.split("_")[1])
@@ -784,7 +890,6 @@ async def handle_cancel(call: types.CallbackQuery):
         s_date, s_time = cur.fetchone()
         conn.commit()
 
-        # Пост в канале автоматически обновляется (освобожденный слот возвращается в список)
         asyncio.create_task(sync_channel_schedule_post())
 
         await call.message.edit_text("🤍 Запись отменена. Буду рада видеть вас в другой раз!", reply_markup=None)
@@ -844,7 +949,6 @@ async def handle_post_book(request):
     conn.commit()
     conn.close()
 
-    # Сразу редактируем пост в канале (слот удаляется из списка)
     asyncio.create_task(sync_channel_schedule_post())
 
     slot_date, slot_time = slot[1], slot[2]
@@ -902,7 +1006,7 @@ async def run_web_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-# --- ЗАПУСК ---
+# --- ЗАПУСК ВСЕЙ СИСТЕМЫ ---
 async def main():
     init_db()
     scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
